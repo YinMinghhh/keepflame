@@ -1,0 +1,278 @@
+"""Inspect the account-level JoinQuant daily sign-in state."""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from urllib.parse import urljoin, urlparse
+
+from keepflame.capabilities.http import (
+    HttpClient,
+    HttpRequest,
+    HttpResponse,
+    HttpTransportError,
+)
+from keepflame.capabilities.secrets import SecretReadError
+from keepflame.core.models import HumanAction, KeepResult, KeepStatus, JsonValue
+from keepflame.core.protocols import KeeperContext
+
+JOINQUANT_ORIGIN = "https://www.joinquant.com"
+TASK_INFO_URL = f"{JOINQUANT_ORIGIN}/credits/task/getTaskInfo"
+SIGNIN_PAGE_URL = f"{JOINQUANT_ORIGIN}/view/user/floor?type=creditsdesc"
+LOGIN_PATH_PREFIX = "/user/login"
+RETRYABLE_STATUSES = {502, 503, 504}
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+TIMEOUT_SECONDS = 15.0
+
+
+def _metadata(code: str, task_status: int | None = None, server_time=None) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {"remote_code": code}
+    if task_status is not None:
+        result["task_status"] = task_status
+    if isinstance(server_time, (str, int, float)) and not isinstance(server_time, bool):
+        result["server_time"] = server_time
+    return result
+
+
+def _signin_action() -> HumanAction:
+    return HumanAction(
+        kind="COMPLETE_OFFICIAL_SIGNIN",
+        summary="聚宽今日尚未签到",
+        instructions="请在聚宽官方积分页面完成滑块验证和签到；KeepFlame 将在下一次复检时确认结果。",
+        url=SIGNIN_PAGE_URL,
+    )
+
+
+def _refresh_session_action() -> HumanAction:
+    return HumanAction(
+        kind="REFRESH_SESSION",
+        summary="聚宽登录会话需要更新",
+        instructions="请从已登录的聚宽会话更新仓库外 Cookie 密钥文件，然后等待下一次复检。",
+        url=SIGNIN_PAGE_URL,
+    )
+
+
+def _browser_challenge_action() -> HumanAction:
+    return HumanAction(
+        kind="COMPLETE_BROWSER_CHALLENGE",
+        summary="聚宽要求浏览器人工验证",
+        instructions="请在聚宽官方页面完成安全验证；KeepFlame 不会尝试绕过验证。",
+        url=SIGNIN_PAGE_URL,
+    )
+
+
+class JoinQuantKeeper:
+    def __init__(self, sleeper: Callable[[float], None] = time.sleep) -> None:
+        self._sleep = sleeper
+
+    def keep(self, context: KeeperContext) -> KeepResult:
+        cookie_file = context.settings.get("cookie_file")
+        if not isinstance(cookie_file, str) or not cookie_file.strip():
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant cookie_file must be a non-empty absolute path",
+                metadata={"error_type": "configuration"},
+            )
+
+        try:
+            raw_cookie = context.secrets.read_text(cookie_file)
+        except SecretReadError:
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message="JoinQuant session secret is unavailable",
+                metadata={"error_type": "session_unavailable"},
+                human_action=_refresh_session_action(),
+            )
+
+        cookie_error = self._validate_cookie(raw_cookie)
+        if cookie_error is not None:
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message=cookie_error,
+                metadata={"error_type": "session_invalid"},
+                human_action=_refresh_session_action(),
+            )
+
+        http = context.capabilities.require("http", HttpClient)
+        request = HttpRequest(
+            method="GET",
+            url=TASK_INFO_URL,
+            headers={
+                "Accept": "application/json",
+                "Cookie": raw_cookie,
+                "User-Agent": "KeepFlame/0.1",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        )
+
+        response: HttpResponse | None = None
+        for attempt in range(2):
+            try:
+                response = http.send(request, timeout_seconds=TIMEOUT_SECONDS)
+            except HttpTransportError:
+                if attempt == 0:
+                    self._sleep(1.0)
+                    continue
+                return KeepResult(
+                    status=KeepStatus.FAILED,
+                    message="JoinQuant status request failed before receiving a response",
+                    metadata={"error_type": "network"},
+                )
+            if response.status in RETRYABLE_STATUSES and attempt == 0:
+                self._sleep(1.0)
+                continue
+            break
+
+        if response is None:
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant status request produced no response",
+                metadata={"error_type": "network"},
+            )
+        return self._interpret(response)
+
+    @staticmethod
+    def _validate_cookie(raw_cookie: str) -> str | None:
+        if not raw_cookie:
+            return "JoinQuant session secret is empty"
+        if "\r" in raw_cookie or "\n" in raw_cookie:
+            return "JoinQuant session secret must be a single line without a Cookie prefix"
+        if raw_cookie.casefold().startswith("cookie:"):
+            return "JoinQuant session secret must contain only the raw Cookie header value"
+        if "=" not in raw_cookie:
+            return "JoinQuant session secret is not a valid Cookie header value"
+        return None
+
+    @classmethod
+    def _interpret(cls, response: HttpResponse) -> KeepResult:
+        text = response.body.decode("utf-8", errors="replace")
+        if response.status in REDIRECT_STATUSES:
+            location = response.header("location") or ""
+            if cls._is_login_location(location):
+                return KeepResult(
+                    status=KeepStatus.WAITING_HUMAN,
+                    message="JoinQuant redirected the status request to login",
+                    metadata={"remote_status": response.status},
+                    human_action=_refresh_session_action(),
+                )
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant returned an unexpected redirect",
+                metadata={"remote_status": response.status},
+            )
+        if response.status == 401:
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message="JoinQuant rejected the expired login session",
+                metadata={"remote_status": response.status},
+                human_action=_refresh_session_action(),
+            )
+        if response.status == 403 and cls._looks_like_challenge(text):
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message="JoinQuant requires an interactive browser verification",
+                metadata={"remote_status": response.status},
+                human_action=_browser_challenge_action(),
+            )
+        if response.status != 200:
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message=f"JoinQuant status request returned HTTP {response.status}",
+                metadata={"remote_status": response.status},
+            )
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            if cls._looks_like_challenge(text):
+                return KeepResult(
+                    status=KeepStatus.WAITING_HUMAN,
+                    message="JoinQuant returned an interactive login or verification page",
+                    metadata={"remote_status": response.status},
+                    human_action=_browser_challenge_action(),
+                )
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant status response was not JSON",
+                metadata={"remote_status": response.status},
+            )
+        if not isinstance(payload, dict):
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant status response had an unexpected shape",
+                metadata={"error_type": "protocol"},
+            )
+
+        code = str(payload.get("code", ""))
+        redirect = payload.get("redirect")
+        if code == "10001" or (isinstance(redirect, str) and cls._is_login_location(redirect)):
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message="JoinQuant login session has expired",
+                metadata=_metadata(code or "10001"),
+                human_action=_refresh_session_action(),
+            )
+        if code != "00000":
+            if code == "20000":
+                message = "JoinQuant rejected the request method or required headers"
+            else:
+                message = "JoinQuant returned an application error"
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message=message,
+                metadata=_metadata(code or "missing"),
+            )
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant response was missing data",
+                metadata=_metadata(code),
+            )
+        task_list = data.get("taskList")
+        login_task = task_list.get("login") if isinstance(task_list, dict) else None
+        status = login_task.get("status") if isinstance(login_task, dict) else None
+        if isinstance(status, bool) or status not in (0, 1, "0", "1"):
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant response was missing a valid login task status",
+                metadata=_metadata(code, server_time=data.get("currTime")),
+            )
+
+        normalized = int(status)
+        metadata = _metadata(code, normalized, data.get("currTime"))
+        if normalized == 1:
+            return KeepResult(
+                status=KeepStatus.SUCCESS,
+                message="JoinQuant daily sign-in is complete",
+                metadata=metadata,
+            )
+        return KeepResult(
+            status=KeepStatus.WAITING_HUMAN,
+            message="JoinQuant daily sign-in still requires human action",
+            metadata=metadata,
+            human_action=_signin_action(),
+        )
+
+    @staticmethod
+    def _is_login_location(location: str) -> bool:
+        if not location:
+            return False
+        absolute = urljoin(JOINQUANT_ORIGIN, location)
+        parsed = urlparse(absolute)
+        return (
+            parsed.scheme == "https"
+            and parsed.netloc == "www.joinquant.com"
+            and parsed.path.startswith(LOGIN_PATH_PREFIX)
+        )
+
+    @staticmethod
+    def _looks_like_challenge(text: str) -> bool:
+        lowered = text.casefold()
+        return any(
+            marker in lowered
+            for marker in ("captcha", "login", "安全验证", "滑块", "验证码", "登录")
+        )
+

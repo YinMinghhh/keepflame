@@ -1,0 +1,21 @@
+[storage]
+path = "/var/lib/keepflame/keepflame.sqlite3"
+
+[[flames]]
+id = "joinquant-primary"
+keeper = "joinquant"
+account_id = "primary"
+enabled = true
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+first_check = "09:00"
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+# This file is mounted read-only by compose.yaml and contains only the raw
+# Cookie header value. Never put the value itself in this TOML file.
+cookie_file = "/run/secrets/joinquant.cookie"
+

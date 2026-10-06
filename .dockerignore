@@ -1,0 +1,11 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+*.sqlite3*
+config/*.local.toml
+secrets
+tests

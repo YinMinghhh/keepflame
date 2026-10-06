@@ -1,0 +1,32 @@
+services:
+  keepflame:
+    build:
+      context: .
+    image: keepflame:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      KEEPFLAME_CONFIG: /etc/keepflame/config.toml
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${KEEPFLAME_CONFIG_FILE:-./config/keepflame.example.toml}:/etc/keepflame/config.toml:ro
+      - ${JOINQUANT_COOKIE_FILE:-./secrets/joinquant.cookie}:/run/secrets/joinquant.cookie:ro
+      - keepflame-data:/var/lib/keepflame
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD", "keepflame", "health", "--config", "/etc/keepflame/config.toml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 15s
+
+volumes:
+  keepflame-data:
+

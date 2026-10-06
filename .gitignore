@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.sqlite3*
+
+# Runtime configuration and secrets are never source artifacts.
+config/*.local.toml
+secrets/
+var/
