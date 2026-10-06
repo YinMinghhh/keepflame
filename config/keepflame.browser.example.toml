@@ -1,0 +1,21 @@
+# Safe example only. Enroll and sign into a dedicated profile before a real run.
+[storage]
+path = "../var/keepflame-browser.sqlite3"
+
+[[flames]]
+id = "joinquant-primary"
+keeper = "joinquant"
+account_id = "primary"
+enabled = true
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+first_check = "09:00"
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+mode = "browser"
+browser_profile_dir = "/absolute/path/outside/repos/keepflame/profiles/primary"
+browser_headless = true

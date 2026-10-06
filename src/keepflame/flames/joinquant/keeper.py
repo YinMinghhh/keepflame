@@ -69,6 +69,13 @@ class JoinQuantKeeper:
         self._sleep = sleeper
 
     def keep(self, context: KeeperContext) -> KeepResult:
+        mode = context.settings.get("mode", "inspect")
+        if mode == "browser":
+            from keepflame.flames.joinquant.browser import JoinQuantBrowserKeeper
+
+            return JoinQuantBrowserKeeper().keep(context)
+        if mode != "inspect":
+            return KeepResult(KeepStatus.FAILED, "Unknown JoinQuant mode", metadata={"error_type": "configuration"})
         cookie_file = context.settings.get("cookie_file")
         if not isinstance(cookie_file, str) or not cookie_file.strip():
             return KeepResult(

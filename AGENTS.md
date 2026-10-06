@@ -114,8 +114,8 @@ FAILED
 WAITING_HUMAN
 ```
 
-CAPTCHAs, QR-code login, MFA, expired credentials, and interactive approval
-must not be flattened into ordinary execution failure. Persist enough context
+QR-code login, MFA, expired credentials, unsupported security challenges, and
+interactive approval must not be flattened into ordinary execution failure. Persist enough context
 to resume safely after the user intervenes.
 
 ### Keep platform complexity local
@@ -195,5 +195,10 @@ Live success against one account does not prove general correctness. Clearly
 separate mocked tests, local integration tests, and real external-service
 verification in reports and documentation.
 
-Do not perform destructive remote actions, bypass CAPTCHAs, or weaken account
-security for automation convenience.
+Do not perform destructive remote actions or weaken account security for
+convenience. The user has explicitly authorized implementing local JoinQuant
+slider solving for their own daily sign-in. Keep that flow within its dedicated,
+explicitly enrolled account profile; use bounded attempts and verified remote
+completion. This does not authorize other reward tasks, third-party challenge
+services, unrelated accounts, or live verification without an approved account
+handoff. Expired sessions, MFA and unsupported challenges require human action.

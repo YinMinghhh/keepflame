@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TextIO
 
 from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, UrllibHttpClient
+from keepflame.capabilities.browser import IsolatedBrowser
 from keepflame.core.config import AppConfig, load_config
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
@@ -39,7 +40,7 @@ def build_runtime(
     orchestrator = Orchestrator(
         storage=storage,
         registry=registry,
-        capabilities=CapabilityRegistry({"http": UrllibHttpClient()}),
+        capabilities=CapabilityRegistry({"http": UrllibHttpClient(), "browser": IsolatedBrowser()}),
         secrets=FileSecretResolver(),
         notifier=delivery_notifier if delivery_notifier is not None else notifier,
         clock=clock,

@@ -9,6 +9,9 @@ description = "Maintain recurring external-service states without hiding human i
 requires-python = ">=3.13"
 dependencies = []
 
+[project.optional-dependencies]
+browser = ["playwright>=1.51,<2", "Pillow>=11,<13", "numpy>=2.2,<3"]
+
 [project.scripts]
 keepflame = "keepflame.cli:main"
 

@@ -7,3 +7,5 @@
 `keepflame.example.toml` 是可提交的安全示例。复制后的真实配置应命名为 `*.local.toml` 或放在仓库外；聚宽配置只引用 Cookie 密钥文件路径，不在 TOML 中内嵌 Cookie。
 
 每个 Flame 必须显式声明唯一 `id`、`keeper`、`account_id`、启用状态和带时区的每日检查窗口。配置加载器拒绝未知字段、重复 Flame ID 和顺序不合法的时间窗口。
+
+`keepflame.browser.example.toml` 显式启用聚宽自动模式，引用已登记的专用浏览器目录。此目录存储登录会话，应留在仓库外；配置不内嵌 Cookie 或密码。真实运行前先完成 JoinQuant 目录说明中的一次会话交接。
