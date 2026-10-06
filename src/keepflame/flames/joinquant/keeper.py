@@ -28,6 +28,21 @@ REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 TIMEOUT_SECONDS = 15.0
 
 
+class _DuplicateJSONMember(ValueError):
+    pass
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            # Keys are already Unicode-decoded by json.loads. Never retain or
+            # expose the duplicate name, values, or a partially selected object.
+            raise _DuplicateJSONMember
+        result[key] = value
+    return result
+
+
 def _metadata(code: str, task_status: int | None = None, server_time=None) -> dict[str, JsonValue]:
     result: dict[str, JsonValue] = {"remote_code": code}
     if task_status is not None:
@@ -210,7 +225,13 @@ class JoinQuantKeeper:
             )
 
         try:
-            payload = json.loads(text)
+            payload = json.loads(text, object_pairs_hook=_unique_json_object)
+        except _DuplicateJSONMember:
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant status response contains duplicate JSON members",
+                metadata={"error_type": "protocol", "protocol_reason": "duplicate_json_member", "signin_state": "unknown"},
+            )
         except json.JSONDecodeError:
             if cls._looks_like_challenge(text):
                 return KeepResult(

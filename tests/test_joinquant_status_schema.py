@@ -101,3 +101,51 @@ def test_absent_data_is_distinguished_from_null_without_inventing_descendant_fie
     assert result.status is KeepStatus.FAILED
     assert result.metadata['status_shape'] == {'data': 'missing', 'taskList': 'unavailable', 'login': 'unavailable', 'status': 'unavailable'}
     assert interpret(None).metadata['status_shape']['data'] == 'null'
+
+
+# Keep these as raw JSON: building a Python dict would erase the ambiguity.
+DUPLICATE_PAYLOADS = [
+    pytest.param('{"code":"00000","data":{"taskList":{"login":{"status":null},"login":{}}}}', id='duplicate_login'),
+    pytest.param('{"code":"10001","code":"00000","data":{"taskList":{}}}', id='duplicate_code'),
+    pytest.param('{"code":"00000","data":null,"data":{"taskList":{}}}', id='duplicate_data'),
+    pytest.param('{"code":"00000","data":{"taskList":null,"taskList":{}}}', id='duplicate_task_list'),
+    pytest.param('{"code":"00000","data":{"taskList":{"login":{"status":0,"status":1}}}}', id='duplicate_status'),
+    pytest.param(r'{"code":"00000","data":{"taskList":{"login":{"status":0,"st\u0061tus":1}}}}', id='escaped_duplicate_status'),
+    pytest.param('{"code":"00000","code":"10001","data":{"taskList":{}}}', id='reversed_code'),
+    pytest.param('{"code":"00000","data":{"taskList":{"login":{"status":1,"status":0}}}}', id='reversed_status'),
+    pytest.param('{"code":"00000","data":{"taskList":{"login":{"status":1,"status":1}}}}', id='identical_values'),
+    pytest.param(r'{"code":"00000","data":{"taskList":{"login":null,"lo\u0067in":{}}}}', id='escaped_duplicate_parent'),
+    pytest.param('{"code":"00000","data":{"taskList":{"login":{"status":1}},"extra":[{"synthetic-private-key":"synthetic-private-first","synthetic-private-key":"synthetic-private-last"}]}}', id='nested_array_object'),
+]
+
+
+@pytest.mark.parametrize('raw', DUPLICATE_PAYLOADS)
+def test_duplicate_members_reject_entire_response_before_actions(raw):
+    result = run_keeper(FakeHttpClient(response(200, raw)))
+    assert result.status is KeepStatus.FAILED
+    assert result.human_action is None
+    assert result.metadata == {'error_type': 'protocol', 'protocol_reason': 'duplicate_json_member', 'signin_state': 'unknown'}
+    assert 'synthetic-private' not in result.message + json.dumps(result.metadata)
+    page = FakePage([result])
+    flow = execute(page)
+    assert flow.status is KeepStatus.FAILED
+    assert flow.metadata['protocol_reason'] == 'duplicate_json_member'
+    assert flow.metadata['signin_state'] == 'unknown'
+    assert page.checks == 1 and page.challenges == 0 and page.answers == []
+
+
+def test_same_key_in_distinct_objects_and_unique_escaped_key_remain_valid():
+    raw = r'{"code":"00000","data":{"taskList":{"login":{"st\u0061tus":1},"post_view":{"status":0}}}}'
+    result = run_keeper(FakeHttpClient(response(200, raw)))
+    assert result.status is KeepStatus.SUCCESS and result.metadata['task_status'] == 1
+
+
+@pytest.mark.parametrize('status', [403, 429])
+def test_http_rejection_still_precedes_duplicate_json_parsing(status):
+    raw = '{"code":"10001","code":"00000","data":{"taskList":{"login":{}}}}'
+    result = run_keeper(FakeHttpClient(response(status, raw)))
+    page = FakePage([result])
+    flow = execute(page)
+    assert flow.status is not KeepStatus.SUCCESS
+    assert flow.metadata['remote_status'] == status
+    assert page.checks == 1 and page.challenges == 0 and page.answers == []
