@@ -37,6 +37,23 @@ def _metadata(code: str, task_status: int | None = None, server_time=None) -> di
     return result
 
 
+def _status_shape(payload: dict) -> dict[str, str]:
+    """Record only fixed-path JSON types, never response values or arbitrary keys."""
+    missing = object()
+    parent = payload
+    shape = {}
+    kinds = {dict: "object", list: "array", str: "string", int: "integer", float: "number", bool: "boolean", type(None): "null"}
+    for key in ("data", "taskList", "login", "status"):
+        if not isinstance(parent, dict):
+            shape[key] = "unavailable"
+            parent = missing
+            continue
+        value = parent.get(key, missing)
+        shape[key] = "missing" if value is missing else kinds.get(type(value), "unknown")
+        parent = value
+    return shape
+
+
 def _signin_action() -> HumanAction:
     return HumanAction(
         kind="COMPLETE_OFFICIAL_SIGNIN",
@@ -234,15 +251,34 @@ class JoinQuantKeeper:
                 metadata=_metadata(code or "missing"),
             )
 
+        shape = _status_shape(payload)
         data = payload.get("data")
         if not isinstance(data, dict):
             return KeepResult(
                 status=KeepStatus.FAILED,
                 message="JoinQuant response was missing data",
-                metadata=_metadata(code),
+                metadata={**_metadata(code), "status_shape": shape},
             )
         task_list = data.get("taskList")
-        login_task = task_list.get("login") if isinstance(task_list, dict) else None
+        if not isinstance(task_list, dict):
+            return KeepResult(
+                status=KeepStatus.FAILED,
+                message="JoinQuant response was missing a valid task list",
+                metadata={**_metadata(code), "status_shape": shape},
+            )
+        login_task = task_list.get("login")
+        # Official credit-center defaults login to {} and treats an undefined
+        # status as eligible. Absence is not evidence of completed sign-in.
+        absent = "login_record_absent" if "login" not in task_list else (
+            "login_status_absent" if isinstance(login_task, dict) and "status" not in login_task else None
+        )
+        if absent is not None:
+            return KeepResult(
+                status=KeepStatus.WAITING_HUMAN,
+                message="JoinQuant daily sign-in is eligible under the public task schema",
+                metadata={**_metadata(code), "signin_state": "eligible", "eligibility_basis": absent, "status_shape": shape},
+                human_action=_signin_action(),
+            )
         status = login_task.get("status") if isinstance(login_task, dict) else None
         valid_status = (type(status) is int and status in (0, 1)) or (
             isinstance(status, str) and status in ("0", "1")
@@ -251,7 +287,7 @@ class JoinQuantKeeper:
             return KeepResult(
                 status=KeepStatus.FAILED,
                 message="JoinQuant response was missing a valid login task status",
-                metadata=_metadata(code, server_time=data.get("currTime")),
+                metadata={**_metadata(code), "status_shape": shape},
             )
 
         normalized = int(status)
@@ -306,4 +342,3 @@ class JoinQuantKeeper:
             marker in lowered
             for marker in ("captcha", "login", "安全验证", "滑块", "验证码", "登录")
         )
-

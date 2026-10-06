@@ -89,11 +89,14 @@ def test_illegal_request_code_is_a_protocol_failure() -> None:
     assert result.metadata["remote_code"] == "20000"
 
 
-def test_missing_login_status_is_a_failure() -> None:
+def test_missing_login_record_is_eligible_not_complete() -> None:
     result = run_keeper(
         FakeHttpClient(response(200, '{"code":"00000","data":{"taskList":{}}}'))
     )
-    assert result.status is KeepStatus.FAILED
+    assert result.status is KeepStatus.WAITING_HUMAN
+    assert result.human_action.kind == "COMPLETE_OFFICIAL_SIGNIN"
+    assert result.metadata["eligibility_basis"] == "login_record_absent"
+    assert "task_status" not in result.metadata
 
 
 def test_html_challenge_is_waiting_human() -> None:

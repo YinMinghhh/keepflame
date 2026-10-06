@@ -28,3 +28,22 @@
 - [积分组件分块](https://cdn.joinquant.com/themes/jq/static/dist/chunk/js/chunk-824f8cab.js?fe-v=1789963951000)，SHA-256：`de672a04511bcf4c29714dc88074b0e45352cf78401fa1434d869f7ecc44e08a`。handleSignin/handleReceiveCredit 通过 receiveCredits 提交，签到规则为 login，挑战字段名为 valideCode；同一接口也服务其他积分规则，所以只限定路径不足以限定每日签到。
 
 以上是源码证据，不是真实账号成功证据。资源/协议发生变化时保持拒绝并停止，不在已登录会话中探测任意写路径。个人资料等非必要读取被阻断可能影响页面渲染，首次真实验收若因此不兼容也应停止，不能自动放宽。
+
+## 任务状态 envelope 与省略形式
+
+上述同一主脚本的 HTTP 包装器从响应中取 JSON body，仅在业务码 `00000` 时返回该 body；积分组件接着读取其 `data.taskList`。因此没有证据把解析路径改为顶层 task、数组中搜索 ruleKey，或额外套一层 data。
+
+上述同一积分组件为任务表设置 `login: {}` 默认值，再以 `Object.assign` 合并服务端 taskList。签到卡片把不存在的 `login.status` 显示为可签到，按钮调用的领取规则固定为 login；页头则只在该记录状态等于 1 时确认已签到。这构成支持省略形式的公开源码依据，不是从真实账号响应推测。
+
+| 状态证据 | KeepFlame 判断 |
+| --- | --- |
+| HTTP 200、业务码 00000，data/taskList 均为对象，省略 login | eligible；保留 login_record_absent 依据，不记 SUCCESS |
+| 同上，login 为对象但省略 status | eligible；保留 login_status_absent 依据，不记 SUCCESS |
+| 明确整数 0 或字符串 "0" | 保留原有 eligible 判断 |
+| 明确整数 1 或字符串 "1" | 已完成；这是唯一完成条件 |
+| null、布尔、未知数值/字符串、数组、错误容器、缺失 data/taskList | unknown/FAILED，不默认转为 eligible |
+| 403、429、认证错误等 | 先按原 HTTP/业务拒绝规则停止，不进入省略判定 |
+
+第二轮真实验收仅保留了 HTTP 200、业务码 00000、FAILED 和次数，没有保留原响应形状。因此不能断言该账号当时正好返回了这里的某种省略形式；合成 fixture 明确取自以上公开逻辑，不冒充实录。
+
+后续解析遇到省略或未知形式时，`status_shape` 只含 data/taskList/login/status 四个固定路径的 JSON 类型标签。`missing` 表示该键确实缺失，`unavailable` 表示父值不是对象、无法继续取该路径；标签不含任何响应值、任意键名、账号信息或 Cookie。该诊断不会发送额外请求，不能补回之前丢失的形状。下一次真实验证必须另获授权，优先只读核对此最小形状，不能凭合成 fixture 直接认定线上解析已修复。
