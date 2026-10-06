@@ -2,7 +2,7 @@
 
 KeepFlame 维护长期存在的外部状态。聚宽已有两种显式模式：`inspect` 查询并提醒，`browser` 在独立会话内尝试自动签到。自动模式会在本机匹配受支持的滑块图片，通过页面原有回调提交，再通过浏览器原生请求通道查询后台确认；验证码通过本身不算签到成功。
 
-自动模式已通过离线单元测试与真实 Chrome 的合成页面测试，尚未用真实聚宽账号验收。当前页面结构、图片质量、接口语义及会话有效期仍需一次受控验证；不能据此宣称已稳定每日签到。
+自动模式已通过离线单元测试与真实 Chrome 的合成页面测试。首次受限真实验收在状态检查时收到会话失效码，尚未发出滑块或签到请求，不能宣称真实自动签到已跑通。当前页面结构、图片质量、接口语义及会话有效期仍需获准后的受控验证。
 
 ## 开发与离线验证
 
@@ -25,9 +25,9 @@ uv sync --extra browser --dev
 cp config/keepflame.browser.example.toml config/keepflame.browser.local.toml
 ```
 
-按 [JoinQuant 接入说明](src/keepflame/flames/joinquant/README.md) 准备仓库外的专用浏览器目录并完成一次官方登录。配置设 `mode = "browser"`，引用该目录；不要提供日常浏览器目录或把 Cookie、密码放入配置。KeepFlame 不扫描调试端口、不接管已有浏览器，运行结束关闭自己的会话。账户会话失效时暂停自动操作并要求更新独立会话。
+按 [JoinQuant 接入说明](src/keepflame/flames/joinquant/README.md) 准备仓库外的专用浏览器目录并完成官方登录。配置设 `mode = "browser"`，引用该目录；不要提供日常浏览器目录或把 Cookie、密码放入配置。首次交接应保持登录浏览器存活，由接入程序把同一会话交给一次执行；关闭后重开会丢失会话 Cookie，持久目录不能保证跨重启登录。KeepFlame 不扫描调试端口、不接管已有浏览器，运行结束关闭自己的会话。账户会话失效时暂停自动操作并要求更新独立会话。
 
-准备好并获准使用真实账号后，可执行一次验收：
+已验证持久登录仍有效并获准使用真实账号后，可独立执行一次验收；以下命令会新开浏览器，不能衔接仅有会话 Cookie 的登录窗口：
 
 ```bash
 .venv/bin/keepflame run-once --config config/keepflame.browser.local.toml --flame joinquant-primary

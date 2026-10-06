@@ -64,9 +64,51 @@ def validate_profile(reference: str, account_id: str) -> Path:
     return path
 
 
+class OwnedBrowserSession:
+    """One in-process handoff from an IsolatedBrowser-owned login session."""
+
+    def __init__(self, page, *, profile_dir: str, account_id: str, origin: str):
+        self._page = page
+        self._identity = (profile_dir, account_id, origin)
+        self._active = True
+        self._claimed = False
+
+    @property
+    def page(self):
+        if not self._active:
+            raise BrowserUnavailable("owned browser session has ended")
+        return self._page
+
+    @contextmanager
+    def open(self, *, profile_dir: str, account_id: str, origin: str, headless: bool = True):
+        if not self._active or self._claimed:
+            raise BrowserUnavailable("owned browser session is no longer available")
+        if (profile_dir, account_id, origin) != self._identity:
+            raise ProfileNotAuthorized("owned browser session identity does not match")
+        # The session's original display mode is retained; no browser is restarted.
+        self._claimed = True
+        yield self._page
+
+    def _expire(self):
+        self._active = False
+
+
 class IsolatedBrowser:
     @contextmanager
     def open(self, *, profile_dir: str, account_id: str, origin: str, headless: bool = True):
+        options = dict(profile_dir=profile_dir, account_id=account_id, origin=origin, headless=headless)
+        with self.session(**options) as session:
+            with session.open(**options) as page:
+                yield page
+
+    @contextmanager
+    def session(self, *, profile_dir: str, account_id: str, origin: str, headless: bool = True):
+        """Keep an owned browser open across human login and one Keeper run.
+
+        A user data directory preserves persistent cookies, but not necessarily
+        session cookies after Chrome exits. Pass this handle as the runtime's
+        browser capability while still inside this context; never export cookies.
+        """
         profile = validate_profile(profile_dir, account_id)
         try:
             from playwright.sync_api import sync_playwright
@@ -89,6 +131,7 @@ class IsolatedBrowser:
 
         with sync_playwright() as playwright:
             context = None
+            session = None
             try:
                 context = playwright.chromium.launch_persistent_context(
                     str(profile), channel="chrome", headless=headless,
@@ -100,7 +143,10 @@ class IsolatedBrowser:
                 context.route("**/*", route_request)
                 context.route_web_socket("**/*", lambda socket: socket.close())
                 page = context.new_page()
-                yield page
+                session = OwnedBrowserSession(page, profile_dir=str(profile), account_id=account_id, origin=origin)
+                yield session
             finally:
+                if session is not None:
+                    session._expire()
                 if context is not None:
                     context.close()
