@@ -76,3 +76,5 @@ SQLite schema v3 从 v1/v2 增加动作、暂停和登录请求表，保留历�
 通知保持现有 stdout JSONL/有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟，错误只记类型；这不是邮件投递。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
 
 更多细节见 [聚宽接入](src/keepflame/flames/joinquant/README.md) 和 [请求协议及预算](src/keepflame/flames/joinquant/PROTOCOL.md)。本机技术验证不代表平台许可，真实操作范围仍需独立确认。
+
+配置文件内容改变或不可读时，daemon 会在本轮结束后的下一调度检查停止派发旧任务；即使修回原文件，也要显式合法 reload 才解除暂停。reload CLI 只打开已存在且兼容的状态库，不会因候选配置改了路径就新建库。数据库路径变更不受支持：修回原路径后再发请求并检查 completed。

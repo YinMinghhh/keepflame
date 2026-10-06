@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import tomllib
 from dataclasses import dataclass
 from datetime import time
@@ -58,6 +59,7 @@ class AppConfig:
     storage: StorageConfig
     flames: tuple[FlameConfig, ...]
     source_path: Path
+    source_fingerprint: str | None = None
 
     def enabled_flames(self) -> tuple[FlameConfig, ...]:
         return tuple(flame for flame in self.flames if flame.enabled)
@@ -116,7 +118,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     source = source.expanduser().resolve()
     try:
         with source.open("rb") as handle:
-            raw = tomllib.load(handle)
+            source_bytes = handle.read(1_048_577)
+        if len(source_bytes) > 1_048_576:
+            raise ConfigError("configuration exceeds size limit")
+        raw = tomllib.loads(source_bytes.decode("utf-8"))
     except FileNotFoundError as exc:
         raise ConfigError(f"configuration file not found: {source}") from exc
     except tomllib.TOMLDecodeError as exc:
@@ -202,5 +207,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         storage=StorageConfig(path=storage_path),
         flames=tuple(flames),
         source_path=source,
+        source_fingerprint=hashlib.sha256(source_bytes).hexdigest(),
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,16 @@ class Runtime:
     configuration_blocked: bool = False
 
     def poll_controls(self):
+        # Edits cannot silently leave old enabled tasks running. Only a valid,
+        # explicit reload can clear this latch, including after the file is fixed.
+        try:
+            with self.config.source_path.open("rb") as handle:
+                content = handle.read(1_048_577)
+            if (len(content) > 1_048_576 or
+                    hashlib.sha256(content).hexdigest() != self.config.source_fingerprint):
+                self.configuration_blocked = True
+        except OSError:
+            self.configuration_blocked = True
         for request in self.storage.runtime_commands():
             try:
                 now = self.orchestrator.clock.now()

@@ -89,13 +89,18 @@ def _notification(value: str) -> PendingNotification:
 
 
 class SQLiteStorage(ControlStorageMixin):
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, existing_only: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self.existing_only = existing_only
+        if existing_only:
+            self.healthcheck()
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5.0)
+        connection = (sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True, timeout=5.0)
+                      if self.existing_only else sqlite3.connect(self.path, timeout=5.0))
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")

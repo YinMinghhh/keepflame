@@ -15,6 +15,7 @@ from keepflame.core.plugins import PluginError
 from keepflame.core.protocols import AutomationPaused
 from keepflame.runtime import Runtime, build_runtime
 from keepflame.storage.sqlite import StorageError
+from keepflame.storage import SQLiteStorage
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -291,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in ("run", "run-once", "login", "resume", "reload") and not args.execute:
             return _dry_run(args)
+        if args.command == "reload":
+            config = load_config(args.config)
+            # Do not initialize a candidate database or browser just to queue a reload.
+            storage = SQLiteStorage(config.storage.path, existing_only=True)
+            identifier = storage.request_reload(datetime.now(timezone.utc))
+            print(json.dumps({"event": "configuration_reload_requested", "request_id": identifier,
+                              "message": "Check runtime_commands for completion; the database path must remain unchanged."}))
+            return 0
         runtime = build_runtime(args.config)
         if args.command in ("run", "run-once"):
             with runtime.storage.execution_lock():
