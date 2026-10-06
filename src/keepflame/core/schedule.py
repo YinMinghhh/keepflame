@@ -1,4 +1,4 @@
-"""Daily inspection-window scheduling without becoming a cron manager."""
+"""Timezone-aware daily windows and persisted, bounded recheck scheduling."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from keepflame.core.models import FlameState, KeepStatus
 
 
 def _at(day: date, schedule_time, zone: ZoneInfo) -> datetime:
-    return datetime.combine(day, schedule_time, tzinfo=zone)
+    # A UTC round trip moves a nonexistent DST wall time forward across the gap.
+    return datetime.combine(day, schedule_time, tzinfo=zone).astimezone(timezone.utc)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -19,26 +20,44 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _in_window(schedule: ScheduleConfig, candidate: datetime) -> datetime:
+    candidate = _as_utc(candidate)
+    zone = ZoneInfo(schedule.timezone)
+    day = candidate.astimezone(zone).date()
+    first = _at(day, schedule.first_check, zone)
+    stop = _at(day, schedule.stop_at, zone)
+    if first >= stop:
+        return _at(day + timedelta(days=1), schedule.first_check, zone)
+    if candidate < first:
+        return first
+    if candidate >= stop:
+        return _at(day + timedelta(days=1), schedule.first_check, zone)
+    return candidate
+
+
 def next_after_result(
     schedule: ScheduleConfig,
     now: datetime,
     status: KeepStatus,
+    *,
+    requested_at: datetime | None = None,
+    consecutive_failures: int = 0,
 ) -> datetime:
+    now = _as_utc(now)
     zone = ZoneInfo(schedule.timezone)
-    local_now = _as_utc(now).astimezone(zone)
-    today = local_now.date()
+    day = now.astimezone(zone).date()
     if status is KeepStatus.SUCCESS:
-        return _at(today + timedelta(days=1), schedule.first_check, zone).astimezone(
-            timezone.utc
-        )
-
-    stop = _at(today, schedule.stop_at, zone)
-    candidate = local_now + timedelta(minutes=schedule.recheck_minutes)
-    if local_now >= stop or candidate >= stop:
-        return _at(today + timedelta(days=1), schedule.first_check, zone).astimezone(
-            timezone.utc
-        )
-    return candidate.astimezone(timezone.utc)
+        candidate = _at(day + timedelta(days=1), schedule.first_check, zone)
+    else:
+        minutes = schedule.recheck_minutes
+        if status is KeepStatus.FAILED:
+            factor = 2 ** min(max(consecutive_failures - 1, 0), 10)
+            minutes = min(minutes * factor, max(minutes, 360))
+        candidate = now + timedelta(minutes=minutes)
+    # Platform cooldowns are lower bounds, never permission for an earlier retry.
+    if requested_at is not None:
+        candidate = max(candidate, _as_utc(requested_at))
+    return _in_window(schedule, candidate)
 
 
 def due_at(
@@ -46,50 +65,29 @@ def due_at(
     state: FlameState | None,
     now: datetime,
 ) -> datetime:
+    now = _as_utc(now)
+    candidate = now
     zone = ZoneInfo(schedule.timezone)
-    now_utc = _as_utc(now)
-    local_now = now_utc.astimezone(zone)
-    today = local_now.date()
-    first = _at(today, schedule.first_check, zone)
-    stop = _at(today, schedule.stop_at, zone)
-
-    if local_now < first:
-        return first.astimezone(timezone.utc)
-    if local_now >= stop:
-        return _at(today + timedelta(days=1), schedule.first_check, zone).astimezone(
-            timezone.utc
-        )
-    if (
-        state is not None
-        and state.status is KeepStatus.SUCCESS
-        and state.last_success_at is not None
-        and state.last_success_at.astimezone(zone).date() == today
-    ):
-        return _at(today + timedelta(days=1), schedule.first_check, zone).astimezone(
-            timezone.utc
-        )
-    if state is not None and state.next_action_at is not None:
-        stored = state.next_action_at.astimezone(timezone.utc)
-        stored_local = stored.astimezone(zone)
-        if now_utc < stored and stored_local.date() == today and stored_local < stop:
-            return stored
-    return now_utc
+    today = now.astimezone(zone).date()
+    if state is not None:
+        if state.next_action_at is not None:
+            candidate = max(candidate, _as_utc(state.next_action_at))
+        if (
+            state.status is KeepStatus.SUCCESS
+            and state.last_success_at is not None
+            and state.last_success_at.astimezone(zone).date() == today
+        ):
+            candidate = max(candidate, _at(today + timedelta(days=1), schedule.first_check, zone))
+    # Preserve future days as well as today's schedule, including after restart.
+    return _in_window(schedule, candidate)
 
 
-def reminder_due(
-    schedule: ScheduleConfig,
-    state: FlameState | None,
-    now: datetime,
-) -> bool:
+def reminder_due(schedule: ScheduleConfig, state: FlameState | None, now: datetime) -> bool:
     if state is None or state.status is not KeepStatus.WAITING_HUMAN:
         return False
+    now = _as_utc(now)
     zone = ZoneInfo(schedule.timezone)
-    local_now = _as_utc(now).astimezone(zone)
-    reminder = _at(local_now.date(), schedule.reminder_at, zone)
-    stop = _at(local_now.date(), schedule.stop_at, zone)
-    if local_now < reminder or local_now >= stop:
+    today = now.astimezone(zone).date()
+    if not _at(today, schedule.reminder_at, zone) <= now < _at(today, schedule.stop_at, zone):
         return False
-    if state.last_reminder_at is None:
-        return True
-    return state.last_reminder_at.astimezone(zone).date() != local_now.date()
-
+    return state.last_reminder_at is None or state.last_reminder_at.astimezone(zone).date() != today

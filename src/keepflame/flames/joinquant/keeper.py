@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from urllib.parse import urljoin, urlparse
 
@@ -119,7 +121,7 @@ class JoinQuantKeeper:
                     message="JoinQuant status request failed before receiving a response",
                     metadata={"error_type": "network"},
                 )
-            if response.status in RETRYABLE_STATUSES and attempt == 0:
+            if response.status in RETRYABLE_STATUSES and attempt == 0 and self._retry_after(response, context.now) is None:
                 self._sleep(1.0)
                 continue
             break
@@ -130,7 +132,7 @@ class JoinQuantKeeper:
                 message="JoinQuant status request produced no response",
                 metadata={"error_type": "network"},
             )
-        return self._interpret(response)
+        return self._interpret(response, now=context.now)
 
     @staticmethod
     def _validate_cookie(raw_cookie: str) -> str | None:
@@ -145,7 +147,7 @@ class JoinQuantKeeper:
         return None
 
     @classmethod
-    def _interpret(cls, response: HttpResponse) -> KeepResult:
+    def _interpret(cls, response: HttpResponse, *, now: datetime) -> KeepResult:
         text = response.body.decode("utf-8", errors="replace")
         if response.status in REDIRECT_STATUSES:
             location = response.header("location") or ""
@@ -179,6 +181,7 @@ class JoinQuantKeeper:
             return KeepResult(
                 status=KeepStatus.FAILED,
                 message=f"JoinQuant status request returned HTTP {response.status}",
+                next_action_at=cls._retry_after(response, now),
                 metadata={"remote_status": response.status},
             )
 
@@ -234,7 +237,10 @@ class JoinQuantKeeper:
         task_list = data.get("taskList")
         login_task = task_list.get("login") if isinstance(task_list, dict) else None
         status = login_task.get("status") if isinstance(login_task, dict) else None
-        if isinstance(status, bool) or status not in (0, 1, "0", "1"):
+        valid_status = (type(status) is int and status in (0, 1)) or (
+            isinstance(status, str) and status in ("0", "1")
+        )
+        if not valid_status:
             return KeepResult(
                 status=KeepStatus.FAILED,
                 message="JoinQuant response was missing a valid login task status",
@@ -255,6 +261,24 @@ class JoinQuantKeeper:
             metadata=metadata,
             human_action=_signin_action(),
         )
+
+    @staticmethod
+    def _retry_after(response: HttpResponse, now: datetime) -> datetime | None:
+        if response.status not in RETRYABLE_STATUSES | {429}:
+            return None
+        value = response.header("retry-after")
+        if not value:
+            return None
+        try:
+            if value.strip().isdigit():
+                candidate = now + timedelta(seconds=int(value))
+            else:
+                candidate = parsedate_to_datetime(value)
+                if candidate.tzinfo is None:
+                    candidate = candidate.replace(tzinfo=timezone.utc)
+            return candidate.astimezone(timezone.utc) if candidate > now else None
+        except (ValueError, TypeError, OverflowError):
+            return None
 
     @staticmethod
     def _is_login_location(location: str) -> bool:

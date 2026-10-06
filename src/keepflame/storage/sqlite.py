@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
+from dataclasses import asdict
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,10 +14,14 @@ from keepflame.core.models import (
     FlameState,
     HumanAction,
     KeepStatus,
+    KeepResult,
+    PendingNotification,
+    Reward,
+    RewardSource,
     RunRecord,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StorageError(RuntimeError):
@@ -56,6 +63,29 @@ def _action(value: str | None) -> HumanAction | None:
     )
 
 
+def _notification_json(value: PendingNotification) -> str:
+    raw = asdict(value)
+    for name in ("occurred_at", "retry_at", "reminder_at"):
+        raw[name] = _timestamp(getattr(value, name))
+    raw["result"]["next_action_at"] = _timestamp(value.result.next_action_at)
+    return _json(raw)
+
+
+def _notification(value: str) -> PendingNotification:
+    raw = json.loads(value)
+    result = raw.pop("result")
+    result["status"] = KeepStatus(result["status"])
+    result["next_action_at"] = _datetime(result["next_action_at"])
+    if result["human_action"] is not None:
+        result["human_action"] = HumanAction(**result["human_action"])
+    if result["reward"] is not None:
+        result["reward"]["source"] = RewardSource(result["reward"]["source"])
+        result["reward"] = Reward(**result["reward"])
+    for name in ("occurred_at", "retry_at", "reminder_at"):
+        raw[name] = _datetime(raw[name])
+    return PendingNotification(result=KeepResult(**result), **raw)
+
+
 class SQLiteStorage:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -73,6 +103,7 @@ class SQLiteStorage:
         try:
             with self._connect() as connection:
                 connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS schema_meta (
@@ -87,7 +118,7 @@ class SQLiteStorage:
                     connection.execute(
                         "INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,)
                     )
-                elif version_row["version"] != SCHEMA_VERSION:
+                elif version_row["version"] not in (1, SCHEMA_VERSION):
                     raise StorageError(
                         f"unsupported database schema version: {version_row['version']}"
                     )
@@ -134,6 +165,14 @@ class SQLiteStorage:
                     ON keep_runs(flame_id, account_id, started_at)
                     """
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS pending_notifications (
+                        flame_id TEXT NOT NULL, account_id TEXT NOT NULL,
+                        notification_id TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL,
+                        PRIMARY KEY (flame_id, account_id)
+                    )"""
+                )
+                connection.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))
         except sqlite3.Error as exc:
             raise StorageError(f"failed to initialize SQLite database: {self.path}") from exc
 
@@ -178,9 +217,14 @@ class SQLiteStorage:
             raise StorageError("failed to list Flame states") from exc
         return [self._state_from_row(row) for row in rows]
 
-    def record(self, run: RunRecord, state: FlameState) -> None:
+    def record(
+        self, run: RunRecord, state: FlameState,
+        notification: PendingNotification | None = None,
+    ) -> None:
         if (run.flame_id, run.account_id) != (state.flame_id, state.account_id):
             raise StorageError("run and state belong to different Flame accounts")
+        if notification is not None and (notification.flame_id, notification.account_id) != (run.flame_id, run.account_id):
+            raise StorageError("notification and run belong to different Flame accounts")
         reward_json = None if run.result.reward is None else _json(run.result.reward.to_dict())
         try:
             with self._connect() as connection:
@@ -242,6 +286,15 @@ class SQLiteStorage:
                         _json(state.metadata),
                     ),
                 )
+                connection.execute(
+                    "DELETE FROM pending_notifications WHERE flame_id = ? AND account_id = ?",
+                    (run.flame_id, run.account_id),
+                )
+                if notification is not None:
+                    connection.execute(
+                        "INSERT INTO pending_notifications VALUES (?, ?, ?, ?)",
+                        (run.flame_id, run.account_id, notification.notification_id, _notification_json(notification)),
+                    )
         except sqlite3.Error as exc:
             raise StorageError("failed to record Keeper run") from exc
 
@@ -270,3 +323,55 @@ class SQLiteStorage:
         if row is None or row["version"] != SCHEMA_VERSION:
             raise StorageError("SQLite schema is not ready")
 
+
+
+    def get_notification(self, flame_id: str, account_id: str) -> PendingNotification | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM pending_notifications WHERE flame_id = ? AND account_id = ?",
+                    (flame_id, account_id),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise StorageError("failed to read pending notification") from exc
+        return None if row is None else _notification(row["payload_json"])
+
+    def update_notification(self, notification: PendingNotification) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE pending_notifications SET payload_json = ? WHERE notification_id = ?",
+                    (_notification_json(notification), notification.notification_id),
+                )
+        except sqlite3.Error as exc:
+            raise StorageError("failed to defer notification") from exc
+
+    def acknowledge_notification(self, notification: PendingNotification) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                deleted = connection.execute(
+                    "DELETE FROM pending_notifications WHERE notification_id = ?",
+                    (notification.notification_id,),
+                ).rowcount
+                if deleted and notification.reminder_at is not None:
+                    connection.execute(
+                        "UPDATE flame_state SET last_reminder_at = ? WHERE flame_id = ? AND account_id = ?",
+                        (_timestamp(notification.reminder_at), notification.flame_id, notification.account_id),
+                    )
+        except sqlite3.Error as exc:
+            raise StorageError("failed to acknowledge notification") from exc
+
+    @contextmanager
+    def execution_lock(self):
+        """One runner per database; status and health remain available."""
+        path = Path(str(self.path.resolve()) + ".runner.lock")
+        with path.open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise StorageError("another KeepFlame runner is already using this database") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)

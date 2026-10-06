@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+from dataclasses import replace
 
 from keepflame.capabilities.http import HttpRequest, HttpResponse
-from keepflame.core.models import FlameState, KeepResult, RunRecord
+from keepflame.core.models import FlameState, KeepResult, PendingNotification, RunRecord
 
 
 class FakeHttpClient:
@@ -38,6 +39,7 @@ class MemoryStorage:
     def __init__(self) -> None:
         self.states: dict[tuple[str, str], FlameState] = {}
         self.runs: list[RunRecord] = []
+        self.notifications: dict[tuple[str, str], PendingNotification] = {}
 
     def get_state(self, flame_id: str, account_id: str) -> FlameState | None:
         return self.states.get((flame_id, account_id))
@@ -45,9 +47,31 @@ class MemoryStorage:
     def list_states(self) -> list[FlameState]:
         return list(self.states.values())
 
-    def record(self, run: RunRecord, state: FlameState) -> None:
+    def record(self, run: RunRecord, state: FlameState, notification=None) -> None:
         self.runs.append(run)
-        self.states[(state.flame_id, state.account_id)] = state
+        key = (state.flame_id, state.account_id)
+        self.states[key] = state
+        if notification is None:
+            self.notifications.pop(key, None)
+        else:
+            self.notifications[key] = notification
+
+    def get_notification(self, flame_id, account_id):
+        return self.notifications.get((flame_id, account_id))
+
+    def update_notification(self, notification):
+        key = (notification.flame_id, notification.account_id)
+        current = self.notifications.get(key)
+        if current is not None and current.notification_id == notification.notification_id:
+            self.notifications[key] = notification
+
+    def acknowledge_notification(self, notification):
+        key = (notification.flame_id, notification.account_id)
+        current = self.notifications.get(key)
+        if current is not None and current.notification_id == notification.notification_id:
+            del self.notifications[key]
+            if notification.reminder_at is not None:
+                self.states[key] = replace(self.states[key], last_reminder_at=notification.reminder_at)
 
     def healthcheck(self) -> None:
         return None

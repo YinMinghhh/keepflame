@@ -37,6 +37,7 @@ class JsonlNotifier:
         self,
         event: str,
         *,
+        notification_id: str,
         flame_id: str,
         account_id: str,
         result: KeepResult,
@@ -45,6 +46,7 @@ class JsonlNotifier:
         payload = {
             "timestamp": occurred_at.astimezone(timezone.utc).isoformat(),
             "event": event,
+            "notification_id": notification_id,
             "flame_id": flame_id,
             "account_id": account_id,
             "status": result.status.value,

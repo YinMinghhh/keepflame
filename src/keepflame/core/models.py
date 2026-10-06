@@ -174,3 +174,25 @@ class RunOutcome:
     state: FlameState
     notification_event: str | None
 
+
+
+@dataclass(frozen=True, slots=True)
+class PendingNotification:
+    """Latest undelivered lifecycle event for one Flame/account."""
+
+    notification_id: str
+    flame_id: str
+    account_id: str
+    event: str
+    result: KeepResult
+    occurred_at: datetime
+    retry_at: datetime | None
+    reminder_at: datetime | None = None
+    attempts: int = 0
+    last_error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("occurred_at", "retry_at", "reminder_at"):
+            _require_aware(getattr(self, name), name)
+        if self.attempts < 0:
+            raise ValueError("notification attempts cannot be negative")

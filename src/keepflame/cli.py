@@ -130,6 +130,14 @@ def _status(runtime: Runtime, as_json: bool) -> int:
         _state_dict(flame, runtime.storage.get_state(flame.id, flame.account_id))
         for flame in runtime.config.flames
     ]
+    for item, flame in zip(items, runtime.config.flames):
+        pending = runtime.storage.get_notification(flame.id, flame.account_id)
+        item["notification"] = None if pending is None else {
+            "event": pending.event, "attempts": pending.attempts,
+            "retry_at": None if pending.retry_at is None else pending.retry_at.isoformat(),
+            "delivery_exhausted": pending.retry_at is None,
+            "last_error_type": pending.last_error_type,
+        }
     if as_json:
         print(
             json.dumps(
@@ -149,6 +157,10 @@ def _status(runtime: Runtime, as_json: bool) -> int:
         )
         if item.get("message"):
             print(f"  {item['message']}")
+        delivery = item.get("notification")
+        if isinstance(delivery, dict):
+            print(f"  NOTIFICATION: {delivery['event']} attempts={delivery['attempts']} "
+                  f"retry={delivery['retry_at'] or 'exhausted; check delivery channel'}")
         action = item.get("human_action")
         if isinstance(action, dict):
             print(f"  HUMAN: {action['summary']}")
@@ -216,10 +228,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         runtime = build_runtime(args.config)
-        if args.command == "run":
-            return _run_daemon(runtime)
-        if args.command == "run-once":
-            return _run_once(runtime, args.flame)
+        if args.command in ("run", "run-once"):
+            with runtime.storage.execution_lock():
+                if args.command == "run":
+                    return _run_daemon(runtime)
+                return _run_once(runtime, args.flame)
         if args.command == "status":
             return _status(runtime, args.as_json)
         if args.command == "health":

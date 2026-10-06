@@ -32,12 +32,17 @@ class SchedulerService:
         current = (now or self.clock.now()).astimezone(timezone.utc)
         outcomes: list[RunOutcome] = []
         for flame in self.config.enabled_flames():
+            current = (now or self.clock.now()).astimezone(timezone.utc)
             state = self.storage.get_state(flame.id, flame.account_id)
             if due_at(flame.schedule, state, current) <= current:
                 outcomes.append(self.orchestrator.run_flame(flame, now=current))
 
+        current = (now or self.clock.now()).astimezone(timezone.utc)
         next_due: datetime | None = None
         for flame in self.config.enabled_flames():
+            notification_due = self.orchestrator.deliver_pending(flame, now=current)
+            if notification_due is not None and (next_due is None or notification_due < next_due):
+                next_due = notification_due
             state = self.storage.get_state(flame.id, flame.account_id)
             candidate = due_at(flame.schedule, state, current)
             if next_due is None or candidate < next_due:
@@ -51,6 +56,6 @@ class SchedulerService:
                 timeout = 60.0
             else:
                 seconds = (next_due - self.clock.now().astimezone(timezone.utc)).total_seconds()
-                timeout = min(max(seconds, 0.25), 60.0)
+                timeout = min(max(seconds, 1.0), 60.0)
             self.stop_event.wait(timeout)
 

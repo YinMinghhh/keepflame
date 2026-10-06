@@ -10,6 +10,7 @@ from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, Urlli
 from keepflame.core.config import AppConfig, load_config
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
+from keepflame.core.protocols import Notifier
 from keepflame.core.service import SchedulerService
 from keepflame.notifier import JsonlNotifier
 from keepflame.storage import SQLiteStorage
@@ -24,7 +25,10 @@ class Runtime:
     service: SchedulerService
 
 
-def build_runtime(config_path: str | Path | None = None, *, stream: TextIO | None = None) -> Runtime:
+def build_runtime(
+    config_path: str | Path | None = None, *, stream: TextIO | None = None,
+    delivery_notifier: Notifier | None = None,
+) -> Runtime:
     config = load_config(config_path)
     storage = SQLiteStorage(config.storage.path)
     notifier = JsonlNotifier(stream)
@@ -37,7 +41,7 @@ def build_runtime(config_path: str | Path | None = None, *, stream: TextIO | Non
         registry=registry,
         capabilities=CapabilityRegistry({"http": UrllibHttpClient()}),
         secrets=FileSecretResolver(),
-        notifier=notifier,
+        notifier=delivery_notifier if delivery_notifier is not None else notifier,
         clock=clock,
     )
     service = SchedulerService(

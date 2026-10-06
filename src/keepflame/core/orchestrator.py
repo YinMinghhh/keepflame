@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,7 @@ from keepflame.core.models import (
     FlameState,
     KeepResult,
     KeepStatus,
+    PendingNotification,
     RunOutcome,
     RunRecord,
 )
@@ -59,6 +60,7 @@ class Orchestrator:
     ) -> RunOutcome:
         started_at = (now or self.clock.now()).astimezone(timezone.utc)
         previous = self.storage.get_state(flame.id, flame.account_id)
+        pending = self.storage.get_notification(flame.id, flame.account_id)
         try:
             keeper = self.registry.resolve(flame.keeper)
             context = KeeperContext(
@@ -81,7 +83,11 @@ class Orchestrator:
         finished_at = (now or self.clock.now()).astimezone(timezone.utc)
         result = replace(
             result,
-            next_action_at=next_after_result(flame.schedule, finished_at, result.status),
+            next_action_at=next_after_result(
+                flame.schedule, finished_at, result.status,
+                requested_at=result.next_action_at,
+                consecutive_failures=(0 if previous is None else previous.consecutive_failures) + 1,
+            ),
         )
         event, mark_reminder = self._notification(
             flame,
@@ -94,7 +100,6 @@ class Orchestrator:
             previous,
             result,
             finished_at,
-            mark_reminder=mark_reminder,
         )
         record = RunRecord(
             run_id=str(uuid4()),
@@ -104,16 +109,58 @@ class Orchestrator:
             finished_at=finished_at,
             result=result,
         )
-        self.storage.record(record, state)
-        if event is not None and notify:
-            self.notifier.notify(
-                event,
-                flame_id=flame.id,
-                account_id=flame.account_id,
-                result=result,
-                occurred_at=finished_at,
+        same_pending = (
+            pending is not None
+            and pending.result.status is result.status
+            and pending.result.message == result.message
+            and pending.result.human_action == result.human_action
+            and (
+                event is None
+                or (
+                    event == pending.event
+                    and pending.occurred_at.astimezone(ZoneInfo(flame.schedule.timezone)).date()
+                    == finished_at.astimezone(ZoneInfo(flame.schedule.timezone)).date()
+                )
             )
+        )
+        if same_pending:
+            pending = replace(pending, result=result)
+        elif event is not None:
+            pending = PendingNotification(
+                notification_id=str(uuid4()), flame_id=flame.id, account_id=flame.account_id,
+                event=event, result=result, occurred_at=finished_at, retry_at=finished_at,
+                reminder_at=finished_at if mark_reminder else None,
+            )
+        else:
+            pending = None
+        self.storage.record(record, state, pending)
+        if notify:
+            self.deliver_pending(flame, now=finished_at)
+            state = self.storage.get_state(flame.id, flame.account_id) or state
         return RunOutcome(record=record, state=state, notification_event=event)
+
+    def deliver_pending(self, flame: FlameConfig, *, now: datetime) -> datetime | None:
+        """Bounded delivery retries are independent of remote status checks."""
+        pending = self.storage.get_notification(flame.id, flame.account_id)
+        if pending is None or pending.retry_at is None:
+            return None
+        if pending.retry_at > now:
+            return pending.retry_at
+        try:
+            self.notifier.notify(
+                pending.event, notification_id=pending.notification_id,
+                flame_id=flame.id, account_id=flame.account_id,
+                result=pending.result, occurred_at=pending.occurred_at,
+            )
+        except Exception as exc:
+            attempts = pending.attempts + 1
+            retry_at = None if attempts >= 5 else now + timedelta(seconds=60 * 2 ** (attempts - 1))
+            self.storage.update_notification(replace(
+                pending, attempts=attempts, retry_at=retry_at, last_error_type=type(exc).__name__,
+            ))
+            return retry_at
+        self.storage.acknowledge_notification(pending)
+        return None
 
     @staticmethod
     def _transition(
@@ -121,8 +168,6 @@ class Orchestrator:
         previous: FlameState | None,
         result: KeepResult,
         checked_at: datetime,
-        *,
-        mark_reminder: bool,
     ) -> FlameState:
         if result.status is KeepStatus.SUCCESS:
             last_success = checked_at
@@ -150,12 +195,7 @@ class Orchestrator:
                 previous.pending_human_since if same_action else checked_at
             )
             action = result.human_action
-            if mark_reminder:
-                last_reminder = checked_at
-            elif same_action:
-                last_reminder = previous.last_reminder_at
-            else:
-                last_reminder = None
+            last_reminder = previous.last_reminder_at if same_action else None
 
         return FlameState(
             flame_id=flame.id,

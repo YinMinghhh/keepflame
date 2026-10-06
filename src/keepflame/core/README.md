@@ -4,4 +4,4 @@
 
 这里不应出现具体平台的 URL、页面选择器、登录步骤或第三方 SDK 调用。核心只编排生命周期并消费统一结果，不统一各平台的执行过程。
 
-当前核心提供统一结果/人工操作模型、严格 TOML 配置、entry-point Keeper 发现、事务状态转换以及每日检查窗口调度。`SchedulerService` 只消费配置和 `next_action_at`，不包含聚宽 URL 或 HTTP 规则。
+当前核心提供统一结果/人工操作模型、严格 TOML 配置、entry-point Keeper 发现、事务状态转换和每日检查窗口。跨日 `next_action_at` 与插件冷却下限会保留，失败按有上限的指数退避复检。`SchedulerService` 分别安排远端检查与待通知投递；通知失败不会触发额外 Keeper 查询，重试预算不因重启而重置。核心不包含聚宽 URL 或 HTTP 规则。

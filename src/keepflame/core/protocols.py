@@ -10,6 +10,7 @@ from keepflame.core.models import (
     FlameState,
     JsonValue,
     KeepResult,
+    PendingNotification,
     RunRecord,
 )
 
@@ -29,7 +30,16 @@ class Storage(Protocol):
 
     def list_states(self) -> list[FlameState]: ...
 
-    def record(self, run: RunRecord, state: FlameState) -> None: ...
+    def record(
+        self, run: RunRecord, state: FlameState,
+        notification: PendingNotification | None = None,
+    ) -> None: ...
+
+    def get_notification(self, flame_id: str, account_id: str) -> PendingNotification | None: ...
+
+    def update_notification(self, notification: PendingNotification) -> None: ...
+
+    def acknowledge_notification(self, notification: PendingNotification) -> None: ...
 
     def healthcheck(self) -> None: ...
 
@@ -39,6 +49,7 @@ class Notifier(Protocol):
         self,
         event: str,
         *,
+        notification_id: str,
         flame_id: str,
         account_id: str,
         result: KeepResult,
