@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Disabled</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONDONTWRITEBYTECODE</key>
+		<string>1</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+		<key>TZ</key>
+		<string>Asia/Shanghai</string>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>240</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>com.keepflame.runner</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/keepflame/Applications/KeepFlame/releases/0000000000000000000000000000000000000000/.venv/bin/python</string>
+		<string>-I</string>
+		<string>-B</string>
+		<string>-m</string>
+		<string>keepflame</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/Users/keepflame/Library/Application Support/KeepFlame/config.toml</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/keepflame/Library/Logs/KeepFlame/runner.err.jsonl</string>
+	<key>StandardOutPath</key>
+	<string>/Users/keepflame/Library/Logs/KeepFlame/runner.out.jsonl</string>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/keepflame/Applications/KeepFlame/releases/0000000000000000000000000000000000000000</string>
+</dict>
+</plist>

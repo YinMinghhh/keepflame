@@ -1,84 +1,76 @@
 # KeepFlame
 
-KeepFlame 维护长期存在的外部状态。聚宽已有两种显式模式：`inspect` 查询并提醒，`browser` 在独立会话内尝试自动签到。自动模式会在本机匹配受支持的滑块图片，通过页面原有回调提交，再通过浏览器原生请求通道查询后台确认；验证码通过本身不算签到成功。
+KeepFlame 为不同网站的日常任务保留统一的调度、状态、人工介入和历史。聚宽插件有 `inspect`（只读查询）和 `browser`（专用浏览器）模式；签到 `task="checkin"` 与阅读积分 `task="reading"` 是两个独立 Flame，共用账号会话。
 
-自动模式已通过离线单元测试与真实 Chrome 的合成页面测试。首次受限真实验收在状态检查时收到会话失效码，尚未发出滑块或签到请求，不能宣称真实自动签到已跑通。当前页面结构、图片质量、接口语义及会话有效期仍需获准后的受控验证。
+**默认不执行。** `run`、`run-once`、`login`、`resume` 不带 `--execute` 时只校验配置并输出计划，不开数据库、浏览器或凭据文件；省略 `enabled` 也默认为关闭。所有发布样例停用，邮件功能本轮暂停，现有通知仅写 stdout JSONL。
 
-## 开发与离线验证
+## 已验证到哪一层
 
-要求 Python 3.13+；新环境可用 `uv sync --dev` 安装。已有 `.venv` 可以直接验证：
+- 文档目标：每日维护多个服务。目前只有聚宽适配器，Telegram/游戏尚未实现。
+- 源码：严格状态解析、自然打开公开文章、单次领取门控、SQLite 动作意图、持久暂停、常驻浏览器上下文，以及默认停用的 Mac 部署准备工具。
+- 离线验证：假的 HTTP、合成图片/页面、临时 SQLite 与空白 Chrome profile；真实账号不参与开发验证。
+- 既有真实证据：2026-10-06 16:54（上海时间）曾对获准账号完成一次签到，后台状态由缺失变为整数 `1`。这只证明当时那一次签到；新增阅读积分、长期运行和服务器部署尚未做真实验收。
+
+## 开发与测试
+
+Python 3.13+。新环境安装命令仅供准备环境，已有依赖无需重新安装：
 
 ```bash
+uv sync --locked --extra browser --dev
 .venv/bin/python -m pytest
-.venv/bin/python -m pytest tests/test_joinquant_flow.py tests/test_reliability.py
-.venv/bin/keepflame --help
+KEEPFLAME_SYNTHETIC_BROWSER=1 .venv/bin/python -m pytest tests/test_runtime_control.py tests/test_joinquant_browser.py tests/test_joinquant_reading_browser.py
 ```
 
-默认测试拦截网络连接，只允许读取测试临时目录内自造的凭据。CLI 合成验收覆盖未签到、首次通知、晚间提醒、人工完成后的复检、重启、次日身份失效；全部使用 Fake HTTP，不接触真实账号。
+默认测试阻断外网和临时目录外的凭据读取；显式 Chrome 测试只用空白合成 profile、本地生成页面及受限传输。它们不证明线上网页完全兼容。浏览器可选依赖为 Playwright、Pillow、NumPy，还需已安装的 Google Chrome。
 
-## 聚宽自动模式
+## 运行计划与账号状态
 
-使用 Python 3.13+、已安装的 Google Chrome 和可选依赖：
+复制 [浏览器配置样例](config/keepflame.browser.example.toml)，真实配置、状态库和专用 profile 均放仓库外。独立阅读配置见 [服务器样例](deploy/keepflame.server.toml.example)。先保留全部任务关闭：
 
 ```bash
-uv sync --extra browser --dev
-cp config/keepflame.browser.example.toml config/keepflame.browser.local.toml
+keepflame run --config /path/to/keepflame.toml
+keepflame status --config /path/to/keepflame.toml --json
+keepflame health --config /path/to/keepflame.toml
 ```
 
-按 [JoinQuant 接入说明](src/keepflame/flames/joinquant/README.md) 准备仓库外的专用浏览器目录并完成官方登录。配置设 `mode = "browser"`，引用该目录；不要提供日常浏览器目录或把 Cookie、密码放入配置。首次交接应保持登录浏览器存活，由接入程序把同一会话交给一次执行；关闭后重开会丢失会话 Cookie，持久目录不能保证跨重启登录。KeepFlame 不扫描调试端口、不接管已有浏览器，运行结束关闭自己的会话。账户会话失效时暂停自动操作并要求更新独立会话。
+第一条是无副作用计划。`status`/`health` 会初始化本地 SQLite；`remote_checked=false` 表示它们不会验证聚宽登录或任务完成，不能作为真实运行健康证明。`status` 包含持久暂停、通知待办和登录请求状态。
 
-已验证持久登录仍有效并获准使用真实账号后，可独立执行一次验收；以下命令会新开浏览器，不能衔接仅有会话 Cookie 的登录窗口：
+后续获准使用真实账号后，才编辑任务开关并添加 `--execute`。同一数据库仅允许一个执行器；`run-once --execute` 跳过时间窗口，但尊重持久暂停和未确认动作记录，不能用它循环重试。
+
+## 登录只交给同一个常驻进程
+
+浏览器上下文由 `run --execute` 持有，任务页每轮关闭；下次任务仍使用同一上下文。KeepFlame 不导出 Cookie、不连接日常浏览器，也不保证 Chrome 退出后会话仍有效。
+
+以下是未来获准接入的操作流程，本轮不需要用户登录：
 
 ```bash
-.venv/bin/keepflame run-once --config config/keepflame.browser.local.toml --flame joinquant-primary
-.venv/bin/keepflame status --config config/keepflame.browser.local.toml --json
+# GUI 登录用户内启动；任务可先全部保持 disabled。
+keepflame run --config /path/to/keepflame.toml --execute
+# 另一个终端请求同一 daemon 打开专用登录窗口。
+keepflame login --config /path/to/keepflame.toml --flame joinquant-primary --execute
+keepflame status --config /path/to/keepflame.toml --json
+# 等状态为 waiting，在官方窗口人工登录；REQUEST_ID 来自前一步输出。
+keepflame login --config /path/to/keepflame.toml --confirm REQUEST_ID --execute
 ```
 
-每轮网络出口最多放行一次挑战、一次验证码回答、一次每日签到写请求，提交后最多查询三次；每个网络步骤有超时，整轮采用 60 秒步骤预算。匹配不明确、布局/回调变化、403、429 或登录失效均停止本轮。最终签到接口的失败同样会中止，页面自己的重试和其他积分规则也会被阻断。失败至少 6 小时后再调度，会话问题至少 24 小时；有效且更晚的 `Retry-After` 优先。`run-once` 是人工显式操作，会跳过调度等待，不应用它循环重试。
+请求只存本地 SQLite，daemon 每至多 5 秒处理一次；正在执行的有界任务结束后才处理新请求。窗口最多 15 分钟，登录阶段禁止签到、阅读登记和领取接口。确认仅表示用户完成操作，后续独立状态查询仍需证明登录有效。取消用 `--cancel REQUEST_ID --execute`；超时、关闭窗口或进程重启不会自动重新登录。服务器必须独立登录，不复制开发机 profile。
 
-只有最终状态接口明确返回当天已签到才记录 `SUCCESS`，已完成则不再次点击。不做浏览文章、点赞、其他积分领取或付费操作；不使用外部解码服务。真实会话、截图和验证码素材不进入 Git/测试/日志。
+## 调度、暂停与不确定结果
 
-## 聚宽查询模式入口
+示例为 `Asia/Shanghai`，每日窗口 `[09:00, 23:00)`；签到与阅读时间错开。同日成功后不再自动查询，停机错过的检查只补查一次，不批量补领历史任务。一般传输失败按 1、2、4、最多 6 小时退避并尊重更晚的 `Retry-After`。
 
-只有在另行确认真实账号接入后，准备个人运行配置和仓库外 Cookie：
+登录失效会持久暂停该 Keeper 的整个账号；挑战、协议变化和不确定领取暂停对应任务，后台不反复尝试。人工处理后 `resume --flame ID --execute` 只解除该任务暂停；浏览器账号登录暂停使用上面的登录确认流程。查询模式在人工更新原凭据文件后，可用 `resume --flame ID --account --execute` 明确恢复该 Keeper 的账号检查，后续仍需验证认证；此命令同样不清未决动作。
 
-```bash
-cp config/keepflame.local.example.toml config/keepflame.local.toml
-# 编辑 cookie_file，指向仓库外的绝对路径；不要把 Cookie 写入 TOML。
-.venv/bin/keepflame health --config config/keepflame.local.toml
-.venv/bin/keepflame status --config config/keepflame.local.toml
-.venv/bin/keepflame run-once --config config/keepflame.local.toml --flame joinquant-primary
-# 准备好持续检查时，在前台运行；Ctrl-C / SIGTERM 退出。
-.venv/bin/keepflame run --config config/keepflame.local.toml
-```
+每次可能产生阅读资格或领取前，SQLite 原子记录 `(keeper, account_id, task)` 的动作意图。进程若在远端执行后崩溃，重启仍保留 `pending`，只能检查是否已完成；跨日、改 Flame ID 或 `resume` 都不会重新获得写入预算。后台明确完成才确认动作，同一确认日仍禁止新写。未确认记录不会自动删除；无法证明完成时保留待办，须另行人工核实，不能直接清库重试。
 
-`run-once` 是显式即时复检，不受每日窗口或已成功状态限制；退出码：成功 `0`、等待人工 `2`、失败 `1`。它输出结果并持久化待通知事件，后续 `run` 会发送。`run` 按计划查询，同一天成功后不再查；同一数据库只允许一个 `run` 或 `run-once`，重复启动会明确报错。常驻运行期间，人工签到后等待下一次复检；若必须即时检查，先停止常驻实例再用 `run-once`。
+SIGTERM/Ctrl-C 停止领取新任务，等待本轮有界流程完成并关闭自有上下文。强制终止无清理保证，但已落盘意图仍阻止盲目重试。验证码通过不等于积分到账，只有后台明确完成才记录 `SUCCESS`；没有可靠奖励数量时不虚构积分。
 
-`status --json` 同时显示状态和通知的待发送/重试耗尽情况。`health` 只验证配置、插件装载和 SQLite；不会查询聚宽，不代表账号已签到或提醒渠道健康。`status/health` 会初始化配置所指的数据库。
+## 部署与数据边界
 
-Cookie 文件应是单行原始请求头值，无 `Cookie:` 前缀和末尾换行；建议仅服务账号可读。每次查询重新读取，因此轮换不需重启。不同账号使用独立 `account_id` 和独立文件。真实配置、凭据和运行库均不提交。
+[部署准备工具](deploy/README.md) 可冻结受审 Git 提交、生成校验包、默认停用的 LaunchAgent/配置，并做只读路径预检。服务器当前未连接、未安装、未启动；GUI 会话、睡眠/唤醒、依赖、网络和真实阅读都仍待服务器阶段核验。旧 Docker 查询样例不包含浏览器环境，默认命令也只会 dry-run。
 
-## 调度与通知
+SQLite schema v3 从 v1/v2 增加动作、暂停和登录请求表，保留历史。回退源码前先核对数据库兼容性；不要恢复旧状态快照后直接重新领取。浏览器凭据与图片均不打包。挑战图片只在内存中处理，不写截图/HAR/视频；持久 profile 的其他浏览器缓存并未承诺完全为空。
 
-示例使用上海时区，检查窗口为 `[09:00, 23:00)`，等待人工时每小时复检，20:00 后首次复检发一次晚间提醒。关闭窗口后保留次日计划；停机错过的检查恢复后只补查一次。失败按 1、2、4、最多 6 小时退避（以配置的复检间隔起步），遵守每日窗口和服务端更晚的 `Retry-After`，不会忙循环。`inspect` 模式单次 HTTP 查询超时 15 秒，网络或安全网关错误最多尝试两次；429 或有有效 `Retry-After` 的网关响应不立即重试。
+通知保持现有 stdout JSONL/有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟，错误只记类型；这不是邮件投递。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
 
-当前渠道仍是 stdout JSONL，尚未连接 Telegram 或邮箱。`Notifier` 是可替换接口，`build_runtime(..., delivery_notifier=...)` 可注入具体渠道；运行事件日志与投递接口分开。状态、历史、最新待通知事件同事务保存；旧的人工待办在恢复后会被恢复事件替换。
-
-投递失败只保存错误类型；每个事件最多尝试 5 次，等待 1、2、4、8 分钟，重启会保留进度。通知重试独立于聚宽查询，窗口关闭也不触发额外查询。耗尽后待通知状态保留并在 `status` 中可见；修好渠道后，需要产生新的状态事件才能启动新一轮自动尝试。发送成功才确认提醒时间。交付采用至少一次语义：进程若在发送成功、确认写库前退出，可能重发；稳定 `notification_id` 可供渠道去重。
-
-## Docker Compose
-
-当前容器只包含查询模式依赖；自动浏览器模式先使用上面的本机入口，不包含在此 Compose 部署中。
-
-```bash
-export KEEPFLAME_CONFIG_FILE=/absolute/path/to/keepflame.local.toml
-export JOINQUANT_COOKIE_FILE=/absolute/path/to/joinquant.cookie
-docker compose up --build -d
-docker compose logs -f keepflame
-```
-
-非 root、只读根文件系统，不开放端口；配置和 Cookie 只读挂载，SQLite 使用独立数据卷。schema v1 会事务升级为 v2，保留已有状态与历史并增加待通知表。容器构建/健康检查不能替代真实账号验收。
-
-真实验收需单独确认最小步骤：用户准备仓库外 Cookie；核对未签到映射为 `WAITING_HUMAN`；确认通知到达；用户在官方页面完成操作；确认复检为 `SUCCESS`。真实账号、收件人、外部通知和常驻部署不属于离线测试。
-
-自动模式的精确请求预算和公开协议证据见 [聚宽执行协议](src/keepflame/flames/joinquant/PROTOCOL.md)。登录与签到执行阶段分开，真实账号验收仍须先通过有界审查；已有合成测试不证明线上页面完全兼容。
+更多细节见 [聚宽接入](src/keepflame/flames/joinquant/README.md) 和 [请求协议及预算](src/keepflame/flames/joinquant/PROTOCOL.md)。本机技术验证不代表平台许可，真实操作范围仍需独立确认。

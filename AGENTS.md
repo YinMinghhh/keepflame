@@ -202,3 +202,12 @@ explicitly enrolled account profile; use bounded attempts and verified remote
 completion. This does not authorize other reward tasks, third-party challenge
 services, unrelated accounts, or live verification without an approved account
 handoff. Expired sessions, MFA and unsupported challenges require human action.
+
+
+The 2026-10-06 continuation authorizes offline implementation and synthetic
+verification of separate JoinQuant reading credits, long-lived browser contexts
+and disabled deployment preparation. This does not authorize live reading,
+login, reward claims, copying account profiles, server connections or service
+installation. Mail work is paused. Keep every default non-executing, preserve
+unconfirmed action intents across restarts and never require a human login for
+development tests.

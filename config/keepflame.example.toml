@@ -5,7 +5,7 @@ path = "/var/lib/keepflame/keepflame.sqlite3"
 id = "joinquant-primary"
 keeper = "joinquant"
 account_id = "primary"
-enabled = true
+enabled = false
 
 [flames.schedule]
 timezone = "Asia/Shanghai"

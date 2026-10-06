@@ -8,4 +8,6 @@
 
 每个 Flame 必须显式声明唯一 `id`、`keeper`、`account_id`、启用状态和带时区的每日检查窗口。配置加载器拒绝未知字段、重复 Flame ID 和顺序不合法的时间窗口。
 
-`keepflame.browser.example.toml` 显式启用聚宽自动模式，引用已登记的专用浏览器目录。此目录存储登录会话，应留在仓库外；配置不内嵌 Cookie 或密码。真实运行前先完成 JoinQuant 目录说明中的一次会话交接。
+`keepflame.browser.example.toml` 声明但默认停用聚宽自动模式，引用已登记的专用浏览器目录。此目录存储登录会话，应留在仓库外；配置不内嵌 Cookie 或密码。真实运行前先完成 JoinQuant 目录说明中的一次会话交接。
+
+现在所有样例默认停用，且 CLI run/run-once 必须显式 --execute 才能运行。`task="checkin"` 与 `task="reading"` 独立配置，不允许同 keeper/account/task 重复。阅读只接受指定公开文章 URL，禁止搜索、自动挑选或付费文章；字段和边界由聚宽插件校验。服务器候选见 deploy/。

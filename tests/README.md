@@ -13,3 +13,5 @@
 `test_joinquant_browser_guard.py` 是独立审查反例的回归：页面额外写请求/重复提交/其他积分规则、实际签到403/429、重定向、伪造fetch成功。测试用本地注入传输替代原生请求，保持真实Chrome执行页面与网络门控。`test_joinquant_guard.py` 单独检查生产原生通道的固定目标、禁止重定向/重试及请求预算。profile 链接测试只创建临时合成目录和 sentinel，不打开真实会话数据库。
 
 `test_browser_session_handoff.py` 默认离线检查同一会话的一次性使用、失败后拒绝重试、账号/profile/origin 绑定和退出关闭。显式设置 `KEEPFLAME_SYNTHETIC_BROWSER=1` 后，其 Chrome 用例只连接操作系统分配端口的回环 TLS fixture，签发合成 HttpOnly/Secure 会话 Cookie，验证从登录页面交给 runtime 时无需关闭浏览器即可通过原生状态读取。该用例禁用外部 DNS、拒绝 Cookie/storage state 导出，结束后关闭本次创建的浏览器与本地服务；不连接聚宽或其他预览端口。
+
+`test_runtime_control.py` 验证默认 dry-run 不初始化资源、原子动作意图、跨日/重启/恢复不重领、账号暂停、正式登录队列及同一上下文复用。显式 Chrome 测试只使用 fixture.invalid 的内存合成页面和空 profile，DNS 全拒绝，证明 HttpOnly 会话 Cookie 可连续供两个任务页使用且未导出。部署工具测试仅在临时合成 Git 仓库操作。
