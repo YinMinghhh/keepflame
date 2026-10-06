@@ -17,6 +17,7 @@ class _Context:
     context: object
     identity: tuple[str, str, str]
     busy: bool = False
+    task_page: object | None = None
     login_page: object | None = None
     login_handler: object | None = None
 
@@ -35,6 +36,9 @@ class BrowserPool:
         if self._closed or get_ident() != self._thread:
             raise BrowserUnavailable("browser pool is closed or used from another thread")
         identity = (profile_dir, account_id, origin)
+        for existing in self._contexts.values():
+            if existing.identity[1:] == (account_id, origin) and existing.identity[0] != profile_dir:
+                raise ProfileNotAuthorized("browser account is already bound to another profile")
         slot = self._contexts.get(profile_dir)
         if slot is not None:
             if slot.identity != identity:
@@ -45,11 +49,28 @@ class BrowserPool:
         owned = self._stack.enter_context(self.browser.session(
             profile_dir=profile_dir, account_id=account_id, origin=origin, headless=self.headless))
         context = owned.page.context
-        # Persistent Chrome may restore old tabs. No page may survive between tasks.
-        for page in list(context.pages):
-            page.close()
         slot = _Context(context, identity)
         self._contexts[profile_dir] = slot
+
+        def owned_page_only(route):
+            # Deny idle traffic, popups and workers before the origin allowlist.
+            try:
+                request_page = route.request.frame.page
+                allowed = request_page is (slot.login_page or slot.task_page) and not request_page.is_closed()
+            except Exception:
+                allowed = False
+            if allowed:
+                route.fallback()
+            else:
+                route.abort("blockedbyclient")
+
+        context.route("**/*", owned_page_only)
+        try:
+            for page in list(context.pages):
+                page.close()
+        except Exception:
+            self.close()
+            raise BrowserUnavailable("browser startup cleanup failed") from None
         return slot
 
     @contextmanager
@@ -61,12 +82,17 @@ class BrowserPool:
         page = None
         try:
             page = slot.context.new_page()
+            slot.task_page = page
             yield page
         finally:
             # Plugin route cleanup happens before this fallback. Always close its page.
+            slot.task_page = None
             try:
                 for owned_page in list(slot.context.pages):
                     owned_page.close()
+            except Exception:
+                self.close()
+                raise BrowserUnavailable("browser task cleanup failed") from None
             finally:
                 slot.busy = False
 
@@ -107,11 +133,14 @@ class BrowserPool:
         try:
             for page in list(slot.context.pages):
                 page.close()
-        finally:
+            slot.login_page = None
             if slot.login_handler is not None:
                 slot.context.unroute('**/*', slot.login_handler)
-            slot.login_page = None
             slot.login_handler = None
+        except Exception:
+            # Keep the gate until the entire owned context closes; never reuse it.
+            self.close()
+            raise BrowserUnavailable("login cleanup failed; browser pool stopped") from None
 
     def close(self):
         self._closed = True

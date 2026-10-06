@@ -31,9 +31,30 @@ class ControlStorageMixin:
             id TEXT PRIMARY KEY, keeper TEXT NOT NULL, account_id TEXT NOT NULL,
             flame_id TEXT NOT NULL, state TEXT NOT NULL,
             created_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
+        connection.execute("DROP INDEX IF EXISTS one_active_login")
         connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_active_login
             ON login_requests(keeper, account_id)
-            WHERE state IN ('requested','waiting','confirmed','cancelled')""")
+            WHERE state IN ('requested','opening','waiting','confirmed','cancelled')""")
+
+        connection.execute("""CREATE TABLE IF NOT EXISTS runtime_commands (
+            id TEXT PRIMARY KEY, command TEXT NOT NULL CHECK(command='reload'),
+            state TEXT NOT NULL, created_at TEXT NOT NULL, error_type TEXT)""")
+
+    def request_reload(self, now):
+        identifier = str(uuid4())
+        with self._connect() as connection:
+            connection.execute("INSERT INTO runtime_commands VALUES (?,'reload','requested',?,NULL)", (identifier, stamp(now)))
+        return identifier
+
+    def runtime_commands(self, *, include_finished=False):
+        with self._connect() as connection:
+            query = "SELECT * FROM runtime_commands" + (" ORDER BY created_at DESC LIMIT 20" if include_finished else " WHERE state='requested' ORDER BY created_at")
+            return [dict(row) for row in connection.execute(query)]
+
+    def finish_command(self, identifier, error_type=None):
+        with self._connect() as connection:
+            connection.execute("UPDATE runtime_commands SET state=?, error_type=? WHERE id=? AND state='requested'",
+                               ('completed' if error_type is None else 'failed', error_type, identifier))
 
     def get_action(self, keeper, account_id, task):
         with self._connect() as connection:
@@ -92,9 +113,12 @@ class ControlStorageMixin:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("""UPDATE login_requests SET state='expired'
-                WHERE expires_at<=? AND state IN ('requested','waiting','confirmed','cancelled')""", (stamp(now),))
+                WHERE expires_at<=? AND state IN ('requested','opening','waiting','confirmed','cancelled')""", (stamp(now),))
             connection.execute("INSERT INTO login_requests VALUES (?,?,?,?,'requested',?,?)",
                                (identifier, keeper, account_id, flame_id, stamp(now), stamp(now + timedelta(minutes=15))))
+            connection.execute("""INSERT INTO runtime_pauses VALUES (?,?,'*','login_requested',?)
+                ON CONFLICT(keeper,account_id,scope) DO UPDATE SET
+                reason='login_requested', paused_at=excluded.paused_at""", (keeper, account_id, stamp(now)))
         return identifier
 
     def request_inspection(self, flame_id, account_id, now):
@@ -107,7 +131,7 @@ class ControlStorageMixin:
             if include_finished:
                 return [dict(row) for row in connection.execute("SELECT * FROM login_requests ORDER BY created_at DESC LIMIT 20")]
             return [dict(row) for row in connection.execute("""SELECT * FROM login_requests
-                WHERE state IN ('requested','waiting','confirmed','cancelled') ORDER BY created_at""")]
+                WHERE state IN ('requested','opening','waiting','confirmed','cancelled') ORDER BY created_at""")]
 
     def transition_login(self, identifier, expected, state):
         with self._connect() as connection:

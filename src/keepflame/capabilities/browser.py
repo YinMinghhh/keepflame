@@ -125,7 +125,20 @@ class IsolatedBrowser:
             if target.scheme == "https" and target.port in (None, 443) and (
                 target.hostname == host or target.hostname == "cdn." + base_domain
             ):
-                route.continue_()
+                response = None
+                try:
+                    # Browser redirects can bypass subsequent route callbacks. Do not
+                    # let a permitted URL redirect around the origin or login gate.
+                    response = route.fetch(timeout=10_000, max_redirects=0, max_retries=0)
+                    if 300 <= response.status < 400:
+                        route.abort("blockedbyclient")
+                    else:
+                        route.fulfill(response=response)
+                except Exception:
+                    route.abort("blockedbyclient")
+                finally:
+                    if response is not None:
+                        response.dispose()
             else:
                 route.abort("blockedbyclient")
 

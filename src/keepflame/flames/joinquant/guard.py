@@ -164,7 +164,7 @@ class SignInGuard:
             if origin == JOINQUANT_ORIGIN and self.phase == "reading":
                 if request.url == self.article_url and request.resource_type == "document" and not self.counts["article_navigation"]:
                     self.counts["article_navigation"] += 1
-                    route.fallback()
+                    self.forward(route, "article_document", 2_097_152)
                     return
                 if path == ARTICLE_INFO_PATH and parsed.query == "postId=" + self.article_id and not self.counts[ARTICLE_INFO_PATH]:
                     self.counts[ARTICLE_INFO_PATH] += 1
@@ -191,7 +191,7 @@ class SignInGuard:
                     return
                 if path == "/view/user/floor" and parsed.query == "type=creditsdesc" and self.counts["navigation"] < (2 if self.task == "reading" else 1):
                     self.counts["navigation"] += 1
-                    route.fallback()
+                    self.forward(route, "credits_document", 2_097_152)
                     return
                 if path == "/user/index/isLogin" and not parsed.query and self.counts["login_status"] < (4 if self.task == "reading" else 2):
                     self.counts["login_status"] += 1

@@ -21,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="keepflame")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("run", "run-once", "status", "health", "login", "resume"):
+    for name in ("run", "run-once", "status", "health", "login", "resume", "reload"):
         command = subparsers.add_parser(name)
         command.add_argument(
             "--config",
@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
             default=default_config_path(),
             help="runtime TOML configuration path",
         )
-        if name in ("run", "run-once", "login", "resume"):
+        if name in ("run", "run-once", "login", "resume", "reload"):
             command.add_argument("--execute", action="store_true", help="explicitly allow the requested operation; default is dry-run")
         if name in ("run-once", "login", "resume"):
             command.add_argument("--flame", help="named Flame")
@@ -151,7 +151,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
     if as_json:
         print(
             json.dumps(
-                {"service_ok": True, "remote_checked": False, "flames": items, "login_requests": runtime.storage.login_requests(include_finished=True)},
+                {"service_ok": True, "remote_checked": False, "flames": items, "login_requests": runtime.storage.login_requests(include_finished=True), "runtime_commands": runtime.storage.runtime_commands(include_finished=True)},
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -252,6 +252,11 @@ def _dry_run(args) -> int:
 
 def _control(runtime, args):
     now = datetime.now(timezone.utc)
+    if args.command == "reload":
+        identifier = runtime.storage.request_reload(now)
+        print(json.dumps({"event": "configuration_reload_requested", "request_id": identifier,
+                          "message": "The daemon applies valid configuration without restarting its browser; check runtime_commands in status."}))
+        return 0
     if args.command == "login" and (args.confirm or args.cancel):
         identifier = args.confirm or args.cancel
         if not runtime.storage.respond_login(identifier, confirm=bool(args.confirm), now=now):
@@ -275,7 +280,6 @@ def _control(runtime, args):
         if not isinstance(flame.settings.get("browser_profile_dir"), str) or not flame.settings["browser_profile_dir"]:
             raise ConfigError("login requires a configured dedicated browser_profile_dir")
         identifier = runtime.storage.request_login(flame.keeper, flame.account_id, flame.id, now)
-        runtime.storage.pause(flame.keeper, flame.account_id, "*", "login_requested", now)
         print(json.dumps({"event": "login_requested", "request_id": identifier,
                           "message": "The executing daemon must consume this request within 15 minutes; check status for waiting."}))
     return 0
@@ -285,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     runtime = None
     try:
-        if args.command in ("run", "run-once", "login", "resume") and not args.execute:
+        if args.command in ("run", "run-once", "login", "resume", "reload") and not args.execute:
             return _dry_run(args)
         runtime = build_runtime(args.config)
         if args.command in ("run", "run-once"):
@@ -293,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command == "run":
                     return _run_daemon(runtime)
                 return _run_once(runtime, args.flame)
-        if args.command in ("login", "resume"):
+        if args.command in ("login", "resume", "reload"):
             return _control(runtime, args)
         if args.command == "status":
             return _status(runtime, args.as_json)

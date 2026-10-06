@@ -3,7 +3,8 @@ services:
     build:
       context: .
     image: keepflame:local
-    restart: unless-stopped
+    # Default command is a one-shot dry-run; do not restart it in a loop.
+    restart: "no"
     init: true
     read_only: true
     cap_drop:
@@ -25,7 +26,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    stop_grace_period: 15s
+    stop_grace_period: 240s
 
 volumes:
   keepflame-data:

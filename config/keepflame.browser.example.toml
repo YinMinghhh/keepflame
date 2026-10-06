@@ -18,4 +18,4 @@ stop_at = "23:00"
 [flames.settings]
 mode = "browser"
 browser_profile_dir = "/absolute/path/outside/repos/keepflame/profiles/primary"
-browser_headless = true
+browser_headless = false

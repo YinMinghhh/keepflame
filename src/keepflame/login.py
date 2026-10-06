@@ -33,6 +33,9 @@ class LoginCoordinator:
                 continue
             if state == 'requested':
                 self.storage.pause(flame.keeper, flame.account_id, '*', 'login_requested', now)
+                if not self.storage.transition_login(identifier, 'requested', 'opening'):
+                    continue
+                request = {**request, 'state': 'opening'}
                 try:
                     keeper = self.registry.resolve(flame.keeper)
                     profile = flame.settings['browser_profile_dir']
@@ -42,9 +45,11 @@ class LoginCoordinator:
                                              origin=keeper.browser_origin, login_url=keeper.login_url,
                                              blocked_paths=keeper.login_blocked_paths)
                     self.active[identifier] = profile
-                    self.storage.transition_login(identifier, 'requested', 'waiting')
+                    self.storage.transition_login(identifier, 'opening', 'waiting')
                 except Exception:
                     self._finish(request, 'failed', profile)
+            elif state == 'opening':
+                self._finish(request, 'interrupted', profile)
             elif state == 'waiting':
                 if profile is None:
                     self._finish(request, 'interrupted', None)

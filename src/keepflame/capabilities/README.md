@@ -15,3 +15,5 @@ profile 登记还检查父目录可控、内部数据链接和所有权；扫描
 CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一上下文，检查 profile/account/origin 绑定，每轮关闭全部任务页，仅进程关闭时退出 Chrome。登录窗口与任务页串行；账号忙碌时拒绝借用。默认 GUI 模式供未来官方人工登录，测试可显式 headless。账号上限8，不自动重开失效上下文；单次 OwnedBrowserSession 接口仍供受控集成使用。
 
 服务器首次登记专用目录时（仅在另行获准后），目录必须是当前运行用户拥有的绝对路径、0700，父目录不可组/其他用户写，且位于任何Git仓库之外。新空目录内创建0600的 `.keepflame-profile.json`，内容严格为 `{"version":1,"account_id":"primary","purpose":"keepflame"}`，account_id须与配置一致。不要重用日常Chrome目录或修改已有profile归属。该标记只登记目录身份，不含凭据也不证明已登录；随后再用正式login控制流。
+
+池同时约束 account/origin 只能使用一个 profile。空闲、非当前拥有页、popup和worker的网络默认拒绝；结束任务先关闭所有页再撤插件门禁，关闭失败则保留门禁并停止整个自有池。底层原生请求禁用自动重定向，避免浏览器重定向跳过后续route检查；登录遇到需跳转的新流程时也会停止，不能临时放宽。

@@ -2,7 +2,7 @@
 
 KeepFlame 为不同网站的日常任务保留统一的调度、状态、人工介入和历史。聚宽插件有 `inspect`（只读查询）和 `browser`（专用浏览器）模式；签到 `task="checkin"` 与阅读积分 `task="reading"` 是两个独立 Flame，共用账号会话。
 
-**默认不执行。** `run`、`run-once`、`login`、`resume` 不带 `--execute` 时只校验配置并输出计划，不开数据库、浏览器或凭据文件；省略 `enabled` 也默认为关闭。所有发布样例停用，邮件功能本轮暂停，现有通知仅写 stdout JSONL。
+**默认不执行。** `run`、`run-once`、`login`、`resume`、`reload` 不带 `--execute` 时只校验配置并输出计划，不开数据库、浏览器或凭据文件；省略 `enabled` 也默认为关闭。所有发布样例停用，邮件功能本轮暂停，现有通知仅写 stdout JSONL。
 
 ## 已验证到哪一层
 
@@ -52,6 +52,8 @@ keepflame status --config /path/to/keepflame.toml --json
 # 等状态为 waiting，在官方窗口人工登录；REQUEST_ID 来自前一步输出。
 keepflame login --config /path/to/keepflame.toml --confirm REQUEST_ID --execute
 ```
+
+完成登录后，可以编辑同一个配置文件启用已获准的任务，再执行 `keepflame reload --config /path/to/keepflame.toml --execute`。daemon 在当前任务结束后应用配置，保留浏览器上下文和未决动作；无需重启。`status --json` 的 `runtime_commands` 必须显示 completed 才表示已应用。重载不支持更换数据库；无效配置会停止派发任务，修正后需再次显式重载。状态里的配置开关来自当前文件，不代表 daemon 已经重载。
 
 请求只存本地 SQLite，daemon 每至多 5 秒处理一次；正在执行的有界任务结束后才处理新请求。窗口最多 15 分钟，登录阶段禁止签到、阅读登记和领取接口。确认仅表示用户完成操作，后续独立状态查询仍需证明登录有效。取消用 `--cancel REQUEST_ID --execute`；超时、关闭窗口或进程重启不会自动重新登录。服务器必须独立登录，不复制开发机 profile。
 

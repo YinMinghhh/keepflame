@@ -252,7 +252,7 @@ def test_owned_browser_restricts_destinations_and_closes_on_error(monkeypatch, t
                          ("https://elsewhere.invalid/", False), ("http://www.joinquant.com/", False),
                          ("https://www.joinquant.com:9443/", False)]:
         result = []
-        route = SimpleNamespace(request=SimpleNamespace(url=url), continue_=lambda:result.append(True), abort=lambda *_:result.append(False))
+        route = SimpleNamespace(request=SimpleNamespace(url=url), fetch=lambda **_:SimpleNamespace(status=200, dispose=lambda:None), fulfill=lambda **_:result.append(True), abort=lambda *_:result.append(False))
         calls["route"](route)
         assert result == [allowed]
     closed = []

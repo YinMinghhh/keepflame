@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
@@ -10,7 +11,7 @@ from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, Urlli
 from keepflame.capabilities.browser import IsolatedBrowser, OwnedBrowserSession
 from keepflame.capabilities.browser_pool import BrowserPool
 from keepflame.login import LoginCoordinator
-from keepflame.core.config import AppConfig, load_config
+from keepflame.core.config import AppConfig, ConfigError, load_config
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
 from keepflame.core.protocols import Notifier
@@ -27,6 +28,35 @@ class Runtime:
     orchestrator: Orchestrator
     service: SchedulerService
     owned_browser: BrowserPool | None = None
+    login: LoginCoordinator | None = None
+    configuration_blocked: bool = False
+
+    def poll_controls(self):
+        for request in self.storage.runtime_commands():
+            try:
+                now = self.orchestrator.clock.now()
+                if now - datetime.fromisoformat(request['created_at']) > timedelta(minutes=15):
+                    self.storage.finish_command(request['id'], 'Expired')
+                    continue
+                updated = load_config(self.config.source_path)
+                if updated.storage.path.resolve() != self.storage.path.resolve():
+                    raise ConfigError("reload cannot change the runtime database")
+                for name in {flame.keeper for flame in updated.enabled_flames()}:
+                    self.orchestrator.registry.resolve(name)
+                self.config = self.service.config = updated
+                self.login.config = updated
+                self.configuration_blocked = False
+                self.storage.finish_command(request['id'])
+                self.notifier.emit('configuration_reloaded', request_id=request['id'])
+            except Exception as exc:
+                # Preserve the existing context and action ledger but stop task dispatch.
+                self.configuration_blocked = True
+                self.storage.finish_command(request['id'], type(exc).__name__)
+                self.notifier.emit('configuration_reload_failed', error_type=type(exc).__name__)
+        self.login.tick()
+
+    def blocked(self, flame):
+        return self.configuration_blocked or self.login.blocked(flame)
 
     def close(self):
         if self.owned_browser is not None:
@@ -64,11 +94,15 @@ def build_runtime(
         before_tick=login.tick,
         blocked=login.blocked,
     )
-    return Runtime(
+    runtime = Runtime(
         config=config,
         storage=storage,
         notifier=notifier,
         orchestrator=orchestrator,
         service=service,
         owned_browser=owned_browser,
+        login=login,
     )
+    service.before_tick = runtime.poll_controls
+    service.blocked = runtime.blocked
+    return runtime

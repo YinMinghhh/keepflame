@@ -27,7 +27,7 @@ def test_default_dry_run_never_constructs_runtime(tmp_path, monkeypatch, capsys)
         pytest.fail('dry-run must not initialize storage, browser or secrets')
     monkeypatch.setattr('keepflame.cli.build_runtime', forbidden)
     path = write_config(tmp_path)
-    for command in ('run', 'run-once', 'login', 'resume'):
+    for command in ('run', 'run-once', 'login', 'resume', 'reload'):
         assert main([command, '--config', str(path)]) == 0
         assert json.loads(capsys.readouterr().out)['execution_enabled'] is False
     assert not (tmp_path / 'state').exists()
@@ -154,12 +154,12 @@ def test_login_confirm_keeps_context_and_never_clears_pending_action(tmp_path):
     assert controller.blocked(flame) and store.is_paused(flame.keeper, flame.account_id, flame.id)
     context = browser.launches[0]
     attempts = []
-    context.handlers[0](SimpleNamespace(request=SimpleNamespace(url=OPTIONS['origin']+'/credits/receive'),
+    context.handlers[-1](SimpleNamespace(request=SimpleNamespace(url=OPTIONS['origin']+'/credits/receive'),
                                         abort=lambda reason: attempts.append('blocked'), fallback=lambda: attempts.append('allowed')))
     assert attempts == ['blocked']
     assert store.respond_login(request, confirm=True, now=NOW)
     controller.tick()
-    assert context.pages == [] and context.handlers == [] and not context.closed
+    assert context.pages == [] and len(context.handlers) == 1 and not context.closed
     assert not store.is_paused(flame.keeper, flame.account_id, flame.id)
     assert store.get_action(flame.keeper, flame.account_id, 'reading').state == 'pending'
     with pool.open(**OPTIONS) as page: assert page.context is context
@@ -260,3 +260,80 @@ def test_cross_day_confirmation_blocks_another_write_on_confirmation_day(tmp_pat
     store.confirm_action('k', 'a', 'reading', next_day, day='2026-10-07')
     assert store.get_action('k', 'a', 'reading').day == '2026-10-07'
     assert not store.reserve_action('k', 'a', 'reading', '2026-10-07', next_day)
+
+
+
+def test_pool_reverse_binding_and_idle_gate():
+    browser = Browser(); pool = BrowserPool(browser)
+    outcomes = []
+    with pool.open(**OPTIONS) as page:
+        handler = page.context.handlers[0]
+        request = SimpleNamespace(frame=SimpleNamespace(page=page))
+        route = SimpleNamespace(request=request, fallback=lambda:outcomes.append('allowed'), abort=lambda _:outcomes.append('blocked'))
+        handler(route)
+        with pytest.raises(ProfileNotAuthorized):
+            with pool.open(**{**OPTIONS, 'profile_dir':'/synthetic/other'}): pass
+        popup = page.context.new_page()
+        route.request = SimpleNamespace(frame=SimpleNamespace(page=popup)); handler(route)
+    route.request = request; handler(route)
+    assert outcomes == ['allowed','blocked','blocked']
+    assert len(browser.launches) == 1
+    pool.close()
+
+
+def test_reload_enables_tasks_without_restarting_browser_and_rejects_db_change(tmp_path, monkeypatch):
+    import io
+    from keepflame.runtime import build_runtime
+    monkeypatch.setattr('keepflame.runtime.SystemClock', lambda: FixedClock(NOW))
+    path = write_config(tmp_path, BASE_CONFIG.replace('enabled = true', 'enabled = false'))
+    source = Browser(); pool = BrowserPool(source)
+    runtime = build_runtime(path, stream=io.StringIO(), browser=pool)
+    try:
+        with pool.open(**OPTIONS) as page: original_context = page.context
+        runtime.storage.reserve_action('joinquant', 'primary', 'reading', '2026-10-06', NOW)
+        path.write_text(BASE_CONFIG)
+        assert runtime.config.enabled_flames() == ()
+        runtime.storage.request_reload(NOW)
+        runtime.poll_controls()
+        assert len(runtime.config.enabled_flames()) == 1
+        assert runtime.service.config is runtime.config and runtime.login.config is runtime.config
+        with pool.open(**OPTIONS) as page: assert page.context is original_context
+        assert len(source.launches) == 1
+        assert runtime.storage.get_action('joinquant', 'primary', 'reading').state == 'pending'
+        path.write_text(BASE_CONFIG.replace('state/keepflame.sqlite3', 'new.sqlite3'))
+        failed_request = runtime.storage.request_reload(NOW)
+        runtime.poll_controls()
+        assert runtime.configuration_blocked
+        assert not (tmp_path/'new.sqlite3').exists()
+        outcomes = {row['id']:row for row in runtime.storage.runtime_commands(include_finished=True)}
+        assert outcomes[failed_request]['state'] == 'failed' and outcomes[failed_request]['error_type'] == 'ConfigError'
+        path.write_text(BASE_CONFIG)
+        runtime.storage.request_reload(NOW)
+        runtime.poll_controls()
+        assert not runtime.configuration_blocked
+    finally:
+        pool.close()
+
+
+@pytest.mark.parametrize('status', [200, 302, 307])
+def test_owned_origin_gate_never_follows_redirects(tmp_path, monkeypatch, status):
+    import sys
+    from keepflame.capabilities.browser import IsolatedBrowser
+    from tests.test_browser_session_handoff import enroll
+    handlers, outcomes = [], []
+    context = SimpleNamespace(set_default_timeout=lambda _:None, route=lambda _, handler:handlers.append(handler),
+                              route_web_socket=lambda *_:None, new_page=lambda:object(), close=lambda:None)
+    @contextmanager
+    def driver():
+        yield SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=lambda *a,**kw:context))
+    monkeypatch.setitem(sys.modules, 'playwright.sync_api', SimpleNamespace(sync_playwright=driver))
+    response = SimpleNamespace(status=status, dispose=lambda:outcomes.append('disposed'))
+    def fetch(**options):
+        assert options['max_redirects'] == options['max_retries'] == 0
+        outcomes.append('fetched')
+        return response
+    route = SimpleNamespace(request=SimpleNamespace(url='https://127.0.0.1/login'), fetch=fetch,
+                            fulfill=lambda **_:outcomes.append('fulfilled'), abort=lambda _:outcomes.append('blocked'))
+    with IsolatedBrowser().session(**enroll(tmp_path)):
+        handlers[0](route)
+    assert outcomes == ['fetched', 'fulfilled' if status == 200 else 'blocked', 'disposed']

@@ -29,10 +29,11 @@ class JoinQuantPage:
         self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch, task=self.task.name)
 
     def close(self):
-        try:
-            self.page.close()
-        finally:
-            self.guard.close()
+        # Popups share this account context and must be gone before unroute.
+        # If close fails, retain the gate; BrowserPool will stop the whole context.
+        for page in list(self.page.context.pages):
+            page.close()
+        self.guard.close()
 
     def timeout(self, maximum=10_000):
         self.guard.check()

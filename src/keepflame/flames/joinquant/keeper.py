@@ -45,10 +45,17 @@ def _unique_json_object(pairs):
 
 
 def _metadata(code: str, task_status: int | None = None, server_time=None) -> dict[str, JsonValue]:
-    result: dict[str, JsonValue] = {"remote_code": code}
+    result: dict[str, JsonValue] = {"remote_code": code if code in {"00000", "10001", "20000"} else "unknown"}
     if task_status is not None:
         result["task_status"] = task_status
-    if isinstance(server_time, (str, int, float)) and not isinstance(server_time, bool):
+    if isinstance(server_time, str) and len(server_time) <= 32:
+        try:
+            parsed_time = datetime.fromisoformat(server_time)
+        except ValueError:
+            pass
+        else:
+            result["server_time"] = parsed_time.date().isoformat() if len(server_time) == 10 else parsed_time.isoformat()
+    elif type(server_time) in (int, float) and 0 <= server_time <= 4_102_444_800_000:
         result["server_time"] = server_time
     return result
 
@@ -285,7 +292,8 @@ class JoinQuantKeeper:
                 metadata={"error_type": "protocol"},
             )
 
-        code = str(payload.get("code", ""))
+        raw_code = payload.get("code")
+        code = raw_code if type(raw_code) is str and raw_code in {"00000", "10001", "20000"} else "unknown"
         redirect = payload.get("redirect")
         if code == "10001" or (isinstance(redirect, str) and cls._is_login_location(redirect)):
             return KeepResult(
