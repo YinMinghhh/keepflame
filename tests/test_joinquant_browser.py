@@ -117,14 +117,14 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
                 storage=MemoryStorage(), now=local(11,9),
             )
             result = JoinQuantBrowserKeeper(page_factory=lambda page, deadline: JoinQuantPage(page, deadline=deadline, request_fetch=request_fetch)).keep(context)
-            expected_status = KeepStatus.SUCCESS if complete else KeepStatus.WAITING_HUMAN if case == "expired" else KeepStatus.FAILED
+            expected_status = KeepStatus.SUCCESS if complete else KeepStatus.WAITING_HUMAN if case in ("expired", "unconfirmed") else KeepStatus.FAILED
             assert result.status is expected_status
             if complete:
                 assert result.metadata["automatic_action"] is True
-                assert page.locator('#state').inner_text() == "BACKEND CONFIRMED"
+                assert remote["signed"] is True
             else:
                 assert result.metadata["reason"] == {
-                    "unconfirmed":"completion_unconfirmed", "challenge_429":"challenge_http",
+                    "unconfirmed":"claim_unconfirmed", "challenge_429":"challenge_http",
                     "validation_429":"validation_http", "callback_changed":"site_callback_changed",
                     "expired":"status_http",
                 }[case]
@@ -135,11 +135,12 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
             assert records.count(("POST","/common/verifyCode/validate")) == (1 if case in ("complete","unconfirmed","validation_429") else 0)
             assert "synthetic-ephemeral-value" not in json.dumps(result.metadata)
             assert not unexpected
+            assert page.is_closed()
+            session.new_page().close()  # The account context survives a task.
             artifacts = os.environ.get("KEEPFLAME_BROWSER_ARTIFACTS")
             if artifacts:
                 target = Path(artifacts)
                 target.mkdir(parents=True,exist_ok=True)
-                page.screenshot(path=str(target / f"synthetic-{case}.png"))
                 (target / f"synthetic-{case}.json").write_text(json.dumps({"status":result.status.value,"metadata":result.metadata,"requests":records,"external_requests":0},indent=2)+'\n')
         finally:
             browser.close()

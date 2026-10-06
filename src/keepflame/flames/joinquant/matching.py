@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import ExitStack
 from dataclasses import dataclass
 import io
 import re
@@ -42,6 +43,11 @@ def _image(uri: str):
 
 def solve_challenge(payload: dict, piece_uri: str) -> Match:
     """Support the observed 33x2 tile layout; reject unknown/ambiguous images."""
+    with ExitStack() as images:
+        return _solve_challenge(payload, piece_uri, images)
+
+
+def _solve_challenge(payload, piece_uri, images):
     import numpy as np
     from PIL import Image
 
@@ -52,9 +58,11 @@ def solve_challenge(payload: dict, piece_uri: str) -> Match:
     if len(offsets) != 66:
         raise MatchError("unsupported_layout")
     atlas = _image(data.get("bgImg"))
+    images.callback(atlas.close)
     if atlas.size != (363, 142):
         raise MatchError("unsupported_layout")
     canvas = Image.new("RGBA", atlas.size)
+    images.callback(canvas.close)
     seen = set()
     for index, item in enumerate(offsets):
         if not isinstance(item, list) or len(item) != 2:
@@ -65,14 +73,20 @@ def solve_challenge(payload: dict, piece_uri: str) -> Match:
         if x % 11 or y % 71 or x + 11 > atlas.width or y + 71 > atlas.height or (x, y) in seen:
             raise MatchError("tile_offset")
         seen.add((x, y))
-        canvas.paste(atlas.crop((x, y, x + 11, y + 71)), (index % 33 * 11, index // 33 * 71))
+        with atlas.crop((x, y, x + 11, y + 71)) as tile:
+            canvas.paste(tile, (index % 33 * 11, index // 33 * 71))
     piece = _image(piece_uri)
+    images.callback(piece.close)
     if not (28 <= piece.width <= 224 and 28 <= piece.height <= 224):
         raise MatchError("piece_dimensions")
     piece = piece.resize((56, 56), Image.Resampling.LANCZOS)
-    background = np.asarray(canvas.convert("L"), dtype=np.float32)
-    patch = np.asarray(piece.convert("L"), dtype=np.float32)
-    mask = np.asarray(piece.getchannel("A")) >= 240
+    images.callback(piece.close)
+    with canvas.convert("L") as grey:
+        background = np.array(grey, dtype=np.float32)
+    with piece.convert("L") as grey:
+        patch = np.array(grey, dtype=np.float32)
+    with piece.getchannel("A") as alpha:
+        mask = np.array(alpha) >= 240
     # Sample a fixed lattice: bounded work even for untrusted image input.
     mask[1::2, :] = False
     mask[:, 1::2] = False

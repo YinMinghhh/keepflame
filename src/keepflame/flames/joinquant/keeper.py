@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from collections.abc import Callable
@@ -52,20 +53,28 @@ def _metadata(code: str, task_status: int | None = None, server_time=None) -> di
     return result
 
 
-def _status_shape(payload: dict) -> dict[str, str]:
+def _status_shape(payload: dict, task: str = "checkin") -> dict[str, str]:
     """Record only fixed-path JSON types, never response values or arbitrary keys."""
     missing = object()
     parent = payload
     shape = {}
     kinds = {dict: "object", list: "array", str: "string", int: "integer", float: "number", bool: "boolean", type(None): "null"}
-    for key in ("data", "taskList", "login", "status"):
+    rule = "post_view" if task == "reading" else "login"
+    task_record = None
+    for key in ("data", "taskList", rule, "status"):
         if not isinstance(parent, dict):
             shape[key] = "unavailable"
             parent = missing
             continue
         value = parent.get(key, missing)
         shape[key] = "missing" if value is missing else kinds.get(type(value), "unknown")
+        if key == rule:
+            task_record = value
         parent = value
+    if task == "reading":
+        count = task_record.get("totalCount", missing) if isinstance(task_record, dict) else missing
+        shape["totalCount"] = ("unavailable" if not isinstance(task_record, dict) else
+                               "missing" if count is missing else kinds.get(type(count), "unknown"))
     return shape
 
 
@@ -97,10 +106,17 @@ def _browser_challenge_action() -> HumanAction:
 
 
 class JoinQuantKeeper:
+    browser_origin = JOINQUANT_ORIGIN
+    login_url = JOINQUANT_ORIGIN + "/user/login"
+    login_blocked_paths = ("/credits/", "/common/verifyCode/", "/user/account/getToken", "/community/post/postView")
+
     def __init__(self, sleeper: Callable[[float], None] = time.sleep) -> None:
         self._sleep = sleeper
 
     def keep(self, context: KeeperContext) -> KeepResult:
+        task = context.settings.get("task", "checkin")
+        if task not in ("checkin", "reading"):
+            return KeepResult(KeepStatus.FAILED, "Unknown JoinQuant task", metadata={"error_type": "configuration"})
         mode = context.settings.get("mode", "inspect")
         if mode == "browser":
             from keepflame.flames.joinquant.browser import JoinQuantBrowserKeeper
@@ -122,7 +138,7 @@ class JoinQuantKeeper:
             return KeepResult(
                 status=KeepStatus.WAITING_HUMAN,
                 message="JoinQuant session secret is unavailable",
-                metadata={"error_type": "session_unavailable"},
+                metadata={"error_type": "session_unavailable", "automation_paused": True, "pause_account": True},
                 human_action=_refresh_session_action(),
             )
 
@@ -131,7 +147,7 @@ class JoinQuantKeeper:
             return KeepResult(
                 status=KeepStatus.WAITING_HUMAN,
                 message=cookie_error,
-                metadata={"error_type": "session_invalid"},
+                metadata={"error_type": "session_invalid", "automation_paused": True, "pause_account": True},
                 human_action=_refresh_session_action(),
             )
 
@@ -171,7 +187,21 @@ class JoinQuantKeeper:
                 message="JoinQuant status request produced no response",
                 metadata={"error_type": "network"},
             )
-        return self._interpret(response, now=context.now)
+        return self._inspection_result(self._interpret(response, now=context.now, task=task))
+
+    @staticmethod
+    def _inspection_result(result):
+        """Do not keep polling expired credentials or an unknown reward protocol."""
+        status = result.metadata.get("remote_status")
+        auth = (status in (401, 403) or result.human_action is not None
+                and result.human_action.kind in {"REFRESH_SESSION", "COMPLETE_BROWSER_CHALLENGE"})
+        protocol = (result.status is KeepStatus.FAILED and
+                    (result.metadata.get("error_type") == "protocol" or "status_shape" in result.metadata
+                     or status in REDIRECT_STATUSES | {200} or status is None))
+        if auth or protocol or status == 429:
+            return replace(result, metadata={**result.metadata, "automation_paused": True,
+                                              **({"pause_account": True} if auth else {})})
+        return result
 
     @staticmethod
     def _validate_cookie(raw_cookie: str) -> str | None:
@@ -186,7 +216,9 @@ class JoinQuantKeeper:
         return None
 
     @classmethod
-    def _interpret(cls, response: HttpResponse, *, now: datetime) -> KeepResult:
+    def _interpret(cls, response: HttpResponse, *, now: datetime, task: str = "checkin") -> KeepResult:
+        if task not in ("checkin", "reading"):
+            return KeepResult(KeepStatus.FAILED, "Unknown JoinQuant task", metadata={"error_type": "configuration"})
         text = response.body.decode("utf-8", errors="replace")
         if response.status in REDIRECT_STATUSES:
             location = response.header("location") or ""
@@ -230,7 +262,8 @@ class JoinQuantKeeper:
             return KeepResult(
                 status=KeepStatus.FAILED,
                 message="JoinQuant status response contains duplicate JSON members",
-                metadata={"error_type": "protocol", "protocol_reason": "duplicate_json_member", "signin_state": "unknown"},
+                metadata={"error_type": "protocol", "protocol_reason": "duplicate_json_member",
+                          "reading_state" if task == "reading" else "signin_state": "unknown"},
             )
         except json.JSONDecodeError:
             if cls._looks_like_challenge(text):
@@ -272,6 +305,8 @@ class JoinQuantKeeper:
                 metadata=_metadata(code or "missing"),
             )
 
+        if task == "reading":
+            return cls._reading_result(payload)
         shape = _status_shape(payload)
         data = payload.get("data")
         if not isinstance(data, dict):
@@ -325,6 +360,50 @@ class JoinQuantKeeper:
             metadata=metadata,
             human_action=_signin_action(),
         )
+
+    @staticmethod
+    def _reading_result(payload) -> KeepResult:
+        """Reading absence means qualification is needed, never claim eligibility."""
+        shape = _status_shape(payload, "reading")
+        metadata = {"remote_code": "00000", "status_shape": shape, "reading_state": "unknown"}
+
+        def unknown():
+            return KeepResult(KeepStatus.FAILED, "JoinQuant reading task has an unsupported status shape",
+                              metadata={**metadata, "error_type": "protocol", "protocol_reason": "reading_status_shape"})
+
+        data = payload.get("data")
+        tasks = data.get("taskList") if isinstance(data, dict) else None
+        if not isinstance(tasks, dict):
+            return unknown()
+        record = tasks.get("post_view", {})
+        if not isinstance(record, dict):
+            return unknown()
+        if "totalCount" in record:
+            count = record["totalCount"]
+            valid = type(count) is int and count >= 0 or (
+                type(count) is str and count.isascii() and count.isdigit()
+                and len(count) <= 20 and (count == "0" or not count.startswith("0")))
+            if not valid:
+                return unknown()
+            metadata["available_credits"] = int(count)
+        if "status" not in record:
+            return KeepResult(KeepStatus.WAITING_HUMAN, "JoinQuant reading qualification has not been observed",
+                metadata={**metadata, "reading_state": "needs_reading"},
+                human_action=HumanAction("READ_OFFICIAL_ARTICLE", "聚宽阅读任务尚未取得资格",
+                    "在已授权的独立浏览器中正常阅读配置的公开文章；前端计时不是后端资格保证。", SIGNIN_PAGE_URL))
+        status = record["status"]
+        if not ((type(status) is int and status in (0, 1)) or (type(status) is str and status in ("0", "1"))):
+            return unknown()
+        metadata["task_status"] = int(status)
+        if int(status) == 1:
+            return KeepResult(KeepStatus.SUCCESS, "JoinQuant backend reports the reading task complete",
+                              metadata={**metadata, "reading_state": "complete"})
+        if "available_credits" not in metadata:
+            return unknown()
+        return KeepResult(KeepStatus.WAITING_HUMAN, "JoinQuant reading reward is available to claim",
+            metadata={**metadata, "reading_state": "claimable"},
+            human_action=HumanAction("CLAIM_OFFICIAL_READING_REWARD", "聚宽阅读积分待领取",
+                "仅在官方阅读任务卡片领取；完成后由后端任务状态确认，不根据点击或提示判定成功。", SIGNIN_PAGE_URL))
 
     @staticmethod
     def _retry_after(response: HttpResponse, now: datetime) -> datetime | None:

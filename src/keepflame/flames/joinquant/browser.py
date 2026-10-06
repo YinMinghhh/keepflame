@@ -7,23 +7,32 @@ from datetime import timedelta
 import json
 import time
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from keepflame.capabilities.browser import BrowserUnavailable, ProfileNotAuthorized
 from keepflame.capabilities.http import HttpResponse
 from keepflame.core.models import HumanAction, KeepResult, KeepStatus
-from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper
+from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper, _unique_json_object
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
 from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
+from keepflame.flames.joinquant.task import TaskConfigurationError, task_from_settings
 
 
 class JoinQuantPage:
-    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None):
+    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None, task=None):
         self.page = page
         self.deadline = deadline
         if origin != JOINQUANT_ORIGIN:
             raise FlowError("unexpected_origin")
         self.origin = origin
-        self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch)
+        self.task = task or task_from_settings({})
+        self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch, task=self.task.name)
+
+    def close(self):
+        try:
+            self.page.close()
+        finally:
+            self.guard.close()
 
     def timeout(self, maximum=10_000):
         self.guard.check()
@@ -33,6 +42,8 @@ class JoinQuantPage:
         return min(remaining, maximum)
 
     def open(self):
+        if self.task.name == "reading":
+            self.guard.prepare_claim_page()
         response = self.page.goto(self.origin + "/view/user/floor?type=creditsdesc", wait_until="domcontentloaded", timeout=self.timeout())
         if response is None:
             raise FlowError("navigation_rejected")
@@ -44,13 +55,48 @@ class JoinQuantPage:
             raise FlowError("unexpected_origin")
 
     def inspect(self, now):
-        return JoinQuantKeeper._interpret(self.guard.read_status(), now=now)
+        return JoinQuantKeeper._interpret(self.guard.read_status(), now=now, task=self.task.name)
+
+    def read_article(self):
+        """Let the original article execute normally; do not originate telemetry."""
+        self.guard.begin_reading(article_id=self.task.article_id, article_url=self.task.article_url)
+        response = self.page.goto(self.task.article_url, wait_until="domcontentloaded", timeout=self.timeout())
+        if response is None or response.status != 200 or self.page.url != self.task.article_url:
+            raise FlowError("article_navigation_changed", response.status if response is not None else None)
+        until = time.monotonic() + self.task.wait_seconds
+        while time.monotonic() < until:
+            self.guard.check()
+            if self.page.is_closed() or self.page.url != self.task.article_url:
+                raise FlowError("article_navigation_changed")
+            self.page.wait_for_timeout(min(250, max(1, int((until-time.monotonic())*1000))))
+        self.guard.check()
+        if not self.guard.article_allowed or self.guard.counts["/community/post/postView"] != 1:
+            raise FlowError("reading_registration_unconfirmed")
+
+    def _button(self):
+        if self.task.name == "reading":
+            cards = self.page.locator(".floor-credit-card").filter(has=self.page.get_by_text(self.task.card_title, exact=True))
+            try:
+                cards.first.wait_for(state="visible", timeout=self.timeout(5_000))
+            except Exception as exc:
+                self.guard.check()
+                raise FlowError("reading_card_changed") from exc
+            if cards.count() != 1:
+                raise FlowError("reading_card_changed")
+            button = cards.get_by_role("button", name=self.task.button, exact=True)
+            try:
+                button.first.wait_for(state="visible", timeout=self.timeout(5_000))
+            except Exception as exc:
+                self.guard.check()
+                raise FlowError("reading_button_changed") from exc
+            return button
+        return self.page.get_by_role("button", name="签到", exact=True)
 
     def challenge(self):
-        self.guard.arm_challenge()
-        button = self.page.get_by_role("button", name="签到", exact=True)
+        button = self._button()
         if button.count() != 1:
             raise FlowError("signin_button_changed")
+        self.guard.arm_challenge()
         def matches(request):
             return (urlsplit(request.url).path == CHALLENGE_PATH
                     and urlsplit(request.url).netloc == urlsplit(self.origin).netloc
@@ -77,7 +123,7 @@ class JoinQuantPage:
         if len(body) > 1_400_000:
             raise FlowError("challenge_size")
         try:
-            payload = json.loads(body)
+            payload = json.loads(body, object_pairs_hook=_unique_json_object)
         except ValueError as exc:
             raise FlowError("challenge_shape") from exc
         piece = self.page.locator("#yth_captchar #xy_img")
@@ -94,9 +140,16 @@ class JoinQuantPage:
     def submit(self, x: int):
         self.guard.arm_validation(x)
         # Challenge token is confined to per-attempt memory; never return/log/persist it.
-        result = self.page.evaluate("""async ({origin, x, timeout}) => {
+        result = self.page.evaluate("""async ({origin, x, timeout, rule, cardTitle, buttonText}) => {
             if (location.origin !== origin) return {reason:'unexpected_origin'};
-            const buttons = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '签到');
+            let scope = document;
+            if (rule === 'post_view') {
+                const cards = [...document.querySelectorAll('.floor-credit-card')].filter(
+                    c => c.querySelector('.header-title')?.textContent.trim() === cardTitle);
+                if (cards.length !== 1) return {reason:'reading_card_changed'};
+                scope = cards[0];
+            }
+            const buttons = [...scope.querySelectorAll('button')].filter(b => b.textContent.trim() === buttonText);
             if (buttons.length !== 1) return {reason:'signin_button_changed'};
             let component = buttons[0].__vue__ || buttons[0].__vue;
             let receiver = null;
@@ -104,6 +157,9 @@ class JoinQuantPage:
                 if (typeof component.getToken === 'function') { receiver=component; break; }
             }
             if (!receiver) return {reason:'site_callback_changed'};
+            if (rule === 'post_view' && (receiver.curRuleKey !== rule || receiver.tokenType !== 'receiveCredits')) {
+                return {reason:'reading_callback_changed'};
+            }
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeout);
             try {
@@ -123,12 +179,14 @@ class JoinQuantPage:
                 return {accepted:true};
             } catch { return {reason:'validation_unconfirmed'}; }
             finally { clearTimeout(timer); }
-        }""", {"origin": self.origin, "x": x, "timeout": self.timeout()})
+        }""", {"origin": self.origin, "x": x, "timeout": self.timeout(), "rule": self.task.rule,
+                  "cardTitle": self.task.card_title, "buttonText": self.task.button})
         self.guard.check()
         if result.get("accepted") is not True:
             # Only fixed local reason codes cross the browser boundary.
             reasons = {"unexpected_origin", "signin_button_changed", "site_callback_changed",
-                       "validation_http", "validation_shape", "challenge_answer_rejected", "validation_unconfirmed"}
+                       "validation_http", "validation_shape", "challenge_answer_rejected", "validation_unconfirmed",
+                       "reading_card_changed", "reading_callback_changed"}
             reason = result.get("reason")
             raise FlowError(reason if reason in reasons else "validation_unconfirmed", result.get("status"), result.get("retry_after"))
         self.guard.wait_for_signin()
@@ -141,93 +199,185 @@ class JoinQuantBrowserKeeper:
         self.sleep = sleeper
 
     @staticmethod
-    def _stop(context, reason, *, human=False, status=None, retry_after=None):
+    def _stop(context, reason, *, human=False, status=None, retry_after=None, paused=False):
         next_action = context.now + timedelta(hours=24 if human else 6)
         if isinstance(retry_after, str) and len(retry_after) <= 128:
             remote_limit = JoinQuantKeeper._retry_after(HttpResponse(
-                status=429 if status in (401,403) else status, url=JOINQUANT_ORIGIN, headers={"retry-after":retry_after}, body=b"",
+                status=429 if status in (401, 403) else status, url=JOINQUANT_ORIGIN,
+                headers={"retry-after": retry_after}, body=b"",
             ), context.now)
             if remote_limit is not None:
                 next_action = max(next_action, remote_limit)
+        metadata = {"execution_mode": "browser", "reason": reason, "remote_status": status}
+        if human or paused or status == 429:
+            metadata["automation_paused"] = True
+        if status in (401, 403) or reason in {"session_refresh_required", "login_required"}:
+            metadata["pause_account"] = True
         return KeepResult(
             status=KeepStatus.WAITING_HUMAN if human else KeepStatus.FAILED,
-            message="JoinQuant automatic sign-in stopped: " + reason,
-            metadata={"execution_mode": "browser", "reason": reason, "remote_status": status},
-            next_action_at=next_action,
+            message="JoinQuant automatic task stopped: " + reason,
+            metadata=metadata, next_action_at=next_action,
             human_action=HumanAction(
-                kind="REVIEW_BROWSER_SESSION", summary="聚宽自动签到需要检查独立会话",
-                instructions="仅在已授权的 KeepFlame 独立浏览器中更新登录或检查站点验证；不要在聊天中提供密码或 Cookie。",
+                kind="REVIEW_BROWSER_SESSION", summary="聚宽自动任务已暂停，需要检查",
+                instructions="请在已授权的独立浏览器中检查登录、任务资格或未确认领取。恢复只允许重新查询；不会重置未决写操作预算。",
                 url=SIGNIN_PAGE_URL,
             ) if human else None,
         )
 
-    def _observation(self, context, result):
+    def _observation(self, context, result, task):
+        allowed = {task.action_kind}
+        if task.name == "reading":
+            allowed.add("READ_OFFICIAL_ARTICLE")
         if result.status is KeepStatus.SUCCESS or (
-            result.status is KeepStatus.WAITING_HUMAN
-            and result.human_action is not None
-            and result.human_action.kind == "COMPLETE_OFFICIAL_SIGNIN"
+            result.status is KeepStatus.WAITING_HUMAN and result.human_action is not None
+            and result.human_action.kind in allowed
         ):
             return replace(result, metadata={**result.metadata, "execution_mode": "browser"})
         status = result.metadata.get("remote_status")
-        human = result.status is KeepStatus.WAITING_HUMAN or status in (401, 403)
-        stopped = self._stop(context, "session_refresh_required" if human else "status_unavailable",
-                             human=human, status=status)
+        auth = result.status is KeepStatus.WAITING_HUMAN or status in (401, 403)
+        protocol = (result.metadata.get("error_type") == "protocol" or "status_shape" in result.metadata
+                    or status is None and result.status is KeepStatus.FAILED)
+        stopped = self._stop(context, "session_refresh_required" if auth else "status_unavailable",
+                             human=auth, paused=protocol, status=status)
         return replace(stopped, metadata={**result.metadata, **stopped.metadata},
                        next_action_at=max(stopped.next_action_at, result.next_action_at or context.now))
 
+    def _unconfirmed(self, context, observation=None, *, cause=None):
+        stopped = self._stop(context, "claim_unconfirmed", human=True,
+                             status=observation.metadata.get("remote_status") if observation else None)
+        metadata = {**(observation.metadata if observation else {}), **stopped.metadata}
+        if cause:
+            metadata["unconfirmed_reason"] = cause
+        return replace(stopped, metadata=metadata,
+                       next_action_at=max(stopped.next_action_at, observation.next_action_at or context.now)
+                       if observation else stopped.next_action_at)
+
+    def _run(self, context, gateway, task, progress):
+        day = context.now.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        action = context.storage.get_action("joinquant", context.account_id, task.name)
+        if task.name == "checkin":
+            gateway.open()
+        before = self._observation(context, gateway.inspect(context.now), task)
+
+        def complete(observation, automatic):
+            if (action is not None and action.state == "pending") or progress["reserved"]:
+                context.storage.confirm_action("joinquant", context.account_id, task.name, context.now, day=day)
+            return replace(observation, metadata={**observation.metadata, "automatic_action": automatic})
+
+        if before.status is KeepStatus.SUCCESS:
+            return complete(before, False)
+        # An uncertain previous write blocks every future write, even across days.
+        if action is not None and action.state == "pending":
+            return self._unconfirmed(context, before)
+        if action is not None and action.state == "confirmed" and action.day == day:
+            return self._unconfirmed(context, before, cause="same_day_action_consumed")
+        if before.status is not KeepStatus.WAITING_HUMAN or before.human_action.kind not in {
+            task.action_kind, "READ_OFFICIAL_ARTICLE" if task.name == "reading" else task.action_kind,
+        }:
+            return before
+
+        def reserve(stage):
+            if not progress["reserved"]:
+                if not context.storage.reserve_action("joinquant", context.account_id, task.name, day, context.now):
+                    return False
+                progress["reserved"] = True
+            progress["action_stage"] = stage
+            return True
+
+        if task.name == "reading" and before.metadata.get("reading_state") == "needs_reading":
+            # Article JavaScript can itself create eligibility. Journal before it runs.
+            if not reserve("reading"):
+                return self._unconfirmed(context, before, cause="action_reservation_rejected")
+            gateway.read_article()
+            before = self._observation(context, gateway.inspect(context.now), task)
+            if before.status is KeepStatus.SUCCESS:
+                return complete(before, True)
+            if before.metadata.get("reading_state") != "claimable":
+                return self._unconfirmed(context, before, cause="reading_qualification_unconfirmed")
+        if task.name == "reading":
+            gateway.open()
+        if not reserve("claim"):
+            return self._unconfirmed(context, before, cause="action_reservation_rejected")
+        payload = piece = None
+        try:
+            try:
+                payload, piece = gateway.challenge()
+            except FlowError as exc:
+                if exc.status is not None or exc.reason not in {"signin_button_changed", "challenge_not_received"}:
+                    raise
+                after = self._observation(context, gateway.inspect(context.now), task)
+                if after.status is KeepStatus.SUCCESS:
+                    return complete(after, True)
+                raise
+            match = self.solver(payload, piece)
+        finally:
+            # Image URIs and challenge bytes are local to this attempt, never files.
+            payload = piece = None
+        gateway.submit(match.x)
+        for attempt in range(3):
+            after = self._observation(context, gateway.inspect(context.now), task)
+            if after.status is KeepStatus.SUCCESS:
+                result = complete(after, True)
+                return replace(result, metadata={**result.metadata, "match_confidence": match.confidence})
+            if after.status is not KeepStatus.WAITING_HUMAN or after.human_action.kind != task.action_kind:
+                return self._unconfirmed(context, after)
+            if attempt < 2:
+                self.sleep(0.5)
+        return self._unconfirmed(context, after, cause="completion_unconfirmed")
+
     def keep(self, context):
+        try:
+            task = task_from_settings(context.settings)
+        except TaskConfigurationError as exc:
+            return self._stop(context, str(exc), human=True)
         profile = context.settings.get("browser_profile_dir")
         headless = context.settings.get("browser_headless", True)
         if not isinstance(profile, str) or not profile or type(headless) is not bool:
             return self._stop(context, "browser_configuration", human=True)
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 60 + (task.wait_seconds if task.name == "reading" else 0)
+        gateway = None
+        progress = {"reserved": False, "action_stage": "inspect"}
         try:
             browser = context.capabilities.require("browser")
             with browser.open(profile_dir=profile, account_id=context.account_id,
                               origin=JOINQUANT_ORIGIN, headless=headless) as page:
-                gateway = self.page_factory(page, deadline=deadline)
-                gateway.open()
-                before = self._observation(context, gateway.inspect(context.now))
-                if before.status is KeepStatus.SUCCESS:
-                    return replace(before, metadata={**before.metadata, "execution_mode": "browser", "automatic_action": False})
-                if before.status is not KeepStatus.WAITING_HUMAN or before.human_action.kind != "COMPLETE_OFFICIAL_SIGNIN":
-                    return before
+                options = {"deadline": deadline}
+                if task.name == "reading":
+                    options["task"] = task
+                gateway = self.page_factory(page, **options)
                 try:
-                    payload, piece = gateway.challenge()
-                except FlowError as exc:
-                    if exc.status is not None or exc.reason not in {"signin_button_changed", "challenge_not_received"}:
-                        raise
-                    # Some site versions can complete without a challenge. A missing
-                    # widget/button alone is never interpreted as success.
-                    after = self._observation(context, gateway.inspect(context.now))
-                    if after.status is KeepStatus.SUCCESS:
-                        return replace(after, metadata={**after.metadata, "execution_mode": "browser", "automatic_action": True})
-                    raise
-                match = self.solver(payload, piece)
-                if time.monotonic() >= deadline:
-                    raise FlowError("time_budget")
-                gateway.submit(match.x)
-                for attempt in range(3):
-                    after = self._observation(context, gateway.inspect(context.now))
-                    if after.status is KeepStatus.SUCCESS:
-                        return replace(after, metadata={**after.metadata, "execution_mode": "browser",
-                            "automatic_action": True, "match_confidence": match.confidence})
-                    if after.status is not KeepStatus.WAITING_HUMAN or after.human_action.kind != "COMPLETE_OFFICIAL_SIGNIN":
-                        return after
-                    if attempt < 2:
-                        self.sleep(0.5)
-                return self._stop(context, "completion_unconfirmed")
+                    result = self._run(context, gateway, task, progress)
+                finally:
+                    # Close the task page before removing its gate, keeping the account
+                    # browser context alive. Fakes may omit close; production never does.
+                    if hasattr(gateway, "close"):
+                        gateway.close()
         except ProfileNotAuthorized:
-            return self._stop(context, "profile_not_enrolled", human=True)
+            result = self._stop(context, "profile_not_enrolled", human=True)
         except BrowserUnavailable:
-            return self._stop(context, "browser_unavailable", human=True)
+            result = self._stop(context, "browser_unavailable", human=True)
         except ImportError:
-            return self._stop(context, "browser_dependencies_missing", human=True)
+            result = self._stop(context, "browser_dependencies_missing", human=True)
         except MatchError as exc:
             allowed = {"image_size", "image_format", "image_dimensions", "image_decode", "challenge_shape",
                        "unsupported_layout", "tile_offset", "piece_dimensions", "insufficient_pixels", "flat_piece", "ambiguous_match"}
-            return self._stop(context, str(exc) if str(exc) in allowed else "image_match_failed")
+            result = self._stop(context, str(exc) if str(exc) in allowed else "image_match_failed", paused=True)
         except FlowError as exc:
-            return self._stop(context, exc.reason, human=exc.status in (401, 403), status=exc.status, retry_after=exc.retry_after)
+            result = self._stop(context, exc.reason, human=exc.status in (401, 403),
+                                status=exc.status, retry_after=exc.retry_after,
+                                paused=progress["reserved"] or exc.status not in (429, 502, 503, 504))
         except Exception:
-            return self._stop(context, "browser_operation_failed")
+            result = self._stop(context, "browser_operation_failed", paused=True)
+        metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"]}
+        if progress["reserved"] and result.status is not KeepStatus.SUCCESS:
+            metadata["automation_paused"] = True
+        if gateway is not None and hasattr(gateway, "guard"):
+            counts = gateway.guard.counts
+            metadata["stage_counts"] = {
+                "status": counts["status"], "page_status": counts["page_status"],
+                "reading_registration": counts["/community/post/postView"],
+                "challenge": counts["/common/verifyCode/captchar"],
+                "answer": counts["/common/verifyCode/validate"],
+                "claim": counts["/credits/task/receiveCredits"],
+            }
+        return replace(result, metadata=metadata)

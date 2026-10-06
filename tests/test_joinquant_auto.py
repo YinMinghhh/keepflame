@@ -110,7 +110,8 @@ def test_success_without_challenge_still_requires_fresh_inspection():
 def test_validation_ack_is_not_completion():
     page = FakePage([unsigned(), unsigned(), unsigned(), unsigned()])
     result = execute(page)
-    assert result.status is KeepStatus.FAILED and result.metadata["reason"] == "completion_unconfirmed"
+    assert result.status is KeepStatus.WAITING_HUMAN and result.metadata["reason"] == "claim_unconfirmed"
+    assert result.metadata["unconfirmed_reason"] == "completion_unconfirmed" and result.metadata["automation_paused"]
     assert page.challenges == 1 and page.answers == [90] and page.checks == 4
 
 

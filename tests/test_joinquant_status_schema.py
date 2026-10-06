@@ -68,8 +68,9 @@ def test_missing_after_submission_is_not_confirmation_and_does_not_resubmit():
     eligible = interpret({'taskList': {'login': {}}})
     page = FakePage([eligible, eligible, eligible, eligible])
     result = execute(page)
-    assert result.status is KeepStatus.FAILED
-    assert result.metadata['reason'] == 'completion_unconfirmed'
+    assert result.status is KeepStatus.WAITING_HUMAN
+    assert result.metadata['reason'] == 'claim_unconfirmed'
+    assert result.metadata['unconfirmed_reason'] == 'completion_unconfirmed' and result.metadata['automation_paused']
     assert page.challenges == 1 and len(page.answers) == 1 and page.checks == 4
 
 
@@ -124,7 +125,7 @@ def test_duplicate_members_reject_entire_response_before_actions(raw):
     result = run_keeper(FakeHttpClient(response(200, raw)))
     assert result.status is KeepStatus.FAILED
     assert result.human_action is None
-    assert result.metadata == {'error_type': 'protocol', 'protocol_reason': 'duplicate_json_member', 'signin_state': 'unknown'}
+    assert result.metadata == {'error_type': 'protocol', 'protocol_reason': 'duplicate_json_member', 'signin_state': 'unknown', 'automation_paused': True}
     assert 'synthetic-private' not in result.message + json.dumps(result.metadata)
     page = FakePage([result])
     flow = execute(page)

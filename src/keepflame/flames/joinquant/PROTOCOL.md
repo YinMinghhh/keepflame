@@ -1,4 +1,4 @@
-# 聚宽签到执行协议与边界
+# 聚宽签到与阅读执行协议边界
 
 2026-10-06 从未登录的官方页面及其静态 JavaScript 只读查证；没有执行这些脚本，也未调用账号/token/验证码/签到接口。浏览器登录阶段由用户操作，`SignInGuard` 仅用于之后的自动签到执行阶段。
 
@@ -49,3 +49,29 @@
 后续解析遇到省略或未知形式时，`status_shape` 只含 data/taskList/login/status 四个固定路径的 JSON 类型标签。`missing` 表示该键确实缺失，`unavailable` 表示父值不是对象、无法继续取该路径；标签不含任何响应值、任意键名、账号信息或 Cookie。该诊断不会发送额外请求，不能补回之前丢失的形状。下一次真实验证必须另获授权，优先只读核对此最小形状，不能凭合成 fixture 直接认定线上解析已修复。
 
 原始状态 JSON 在解释业务码和省略形式之前检测每一层对象的重复成员。Unicode 转义解码后的同名键也算重复；无论值相同、不同或顺序如何，都拒绝整份响应，返回固定协议错误 `duplicate_json_member` / unknown，不取首值或末值、不保留部分状态，也不记录重复键名或值。不同对象里各自出现相同键仍合法。HTTP 403/429 等已有拒绝规则仍先于 JSON 解析。
+
+
+## 独立阅读任务（仅合成验证）
+
+[官方文章组件](https://cdn.joinquant.com/themes/jq/static/dist/chunk/js/chunk-bab6c78e.js?fe-v=1789963951000) SHA-256 `c2c690cea34b6f51f547312b3859c99d2a795e0120998e408d4c7a1301d08b7f`：handleBrowseTime 在 `browseTime*1000` 后经原页面 fetchSecret 发起 postView；默认 browseTime=6。公开主脚本把全局 axios POST 转换为表单。这里只允许原页面自然发起并完整校验表单，不调用该方法、不构造登记请求，也不改变计时或可见性。代码中没有直接滚动/可见性前置判断，不代表后端不校验这些条件。
+
+同一组件 GET `/community/post/detailV2?postId=<本轮ID>` 加载文章内容；公开编辑类型表有 0–4，文章模板以 type==5 表示付费文章。KeepFlame 只接受前者，拒绝返回跳转 URL、付费类型或未知值。详情/登记响应只在内存检查，绝不记录文章作者、正文或账号信息；未知仍停止，需后续获准真实验证。
+
+积分组件 `post_view` 卡片标题“浏览社区文章”，content“浏览1篇文章可以获得1积分，每月最多可得30分”，credit=totalCount。status 缺失选择“去看看”，0 选择“立即领取”，1 选择“已完成”；领取调用 handleReceiveCredit('post_view')。因此阅读缺失不是可领取；status=0 必须同时有非负整数 totalCount。status=1 是后端任务完成证据，但当前未确认其每日/每月业务口径，结果不虚报领取金额或当日积分。
+
+| 阅读请求 | 每轮上限 | 条件 |
+| --- | --- | --- |
+| GET 配置的 `/view/community/detail/<数字>` | 1 | 初查需要阅读，持久化 pending 后；严格 HTTPS/host，无 query/fragment |
+| GET `/community/post/detailV2?postId=<本轮ID>` | 1 | 阅读阶段，经原生 route.fetch、不随重定向；公开类型确认 |
+| GET `/user/index/isLogin` | 文章页 2 | 阅读阶段的原页登录判断 |
+| GET `/user/account/getToken` | 阅读阶段 1 | 详情已确认为受支持文章，原页面自然请求 |
+| POST `/community/post/postView` | 1 | 原任务页主 frame、精确 URL、本轮 postId、表单只含 postId/appKey/appSecret、已取阅读签名 |
+| GET `/view/user/floor?type=creditsdesc` | 1（门禁硬上限2） | 资格已确认后，为领取按钮加载官方积分页 |
+| GET `/credits/task/getTaskInfo` 页面渲染 | 1 | 仅积分页加载阶段，经原生 transport；不作为 Keeper 完成证据 |
+| GET `/credits/task/getTaskInfo` Keeper 查询 | 5 | 初查1、资格后查1、最终最多3；与渲染读分开计数 |
+| 挑战/答案/最终领取 | 各1 | 复用既有签到门禁，最终 ruleKey 固定 post_view；领取回调 curRuleKey/tokenType 也须匹配 |
+| GET `/user/account/getToken` 领取准备 | 1 | 答案通过后的领取回调；不复用阅读签名预算 |
+
+不允许文章页其它写操作、下载、付费、回复、点赞、任意帖子登记、额外遥测字段或 task 查询参数。其它非必要 GET 仍阻断，不能为了页面成功而扩大到任意接口。
+
+动作记录在自然阅读登记之前或领取挑战之前 reserve。pending 跨日阻断新动作；已确认当日也阻断重复尝试。未知完成返回 claim_unconfirmed，明确要求人工检查；普通恢复不清除动作记录，只有后端完成才能 confirm。所有退出路径关闭任务页再移除本轮 handler，不关闭整个账号 context。图像只在内存，Pillow 对象 finally 关闭；浏览器缓存的剩余边界不作无落盘保证。
