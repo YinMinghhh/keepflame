@@ -9,9 +9,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from keepflame.core.config import ConfigError, FlameConfig, default_config_path
+from keepflame.core.config import ConfigError, FlameConfig, default_config_path, load_config
 from keepflame.core.models import FlameState, KeepStatus, RunOutcome
 from keepflame.core.plugins import PluginError
+from keepflame.core.protocols import AutomationPaused
 from keepflame.runtime import Runtime, build_runtime
 from keepflame.storage.sqlite import StorageError
 
@@ -20,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="keepflame")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("run", "run-once", "status", "health"):
+    for name in ("run", "run-once", "status", "health", "login", "resume"):
         command = subparsers.add_parser(name)
         command.add_argument(
             "--config",
@@ -28,8 +29,16 @@ def _parser() -> argparse.ArgumentParser:
             default=default_config_path(),
             help="runtime TOML configuration path",
         )
-        if name == "run-once":
-            command.add_argument("--flame", help="run only the named Flame")
+        if name in ("run", "run-once", "login", "resume"):
+            command.add_argument("--execute", action="store_true", help="explicitly allow the requested operation; default is dry-run")
+        if name in ("run-once", "login", "resume"):
+            command.add_argument("--flame", help="named Flame")
+        if name == "resume":
+            command.add_argument("--account", action="store_true", help="also resume this Keeper account after manually resolving authentication")
+        if name == "login":
+            group = command.add_mutually_exclusive_group()
+            group.add_argument("--confirm", metavar="REQUEST_ID")
+            group.add_argument("--cancel", metavar="REQUEST_ID")
         if name == "status":
             command.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -132,6 +141,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
     ]
     for item, flame in zip(items, runtime.config.flames):
         pending = runtime.storage.get_notification(flame.id, flame.account_id)
+        item["automation_paused"] = runtime.storage.is_paused(flame.keeper, flame.account_id, flame.id)
         item["notification"] = None if pending is None else {
             "event": pending.event, "attempts": pending.attempts,
             "retry_at": None if pending.retry_at is None else pending.retry_at.isoformat(),
@@ -141,7 +151,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
     if as_json:
         print(
             json.dumps(
-                {"service_ok": True, "flames": items},
+                {"service_ok": True, "remote_checked": False, "flames": items, "login_requests": runtime.storage.login_requests(include_finished=True)},
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -155,6 +165,8 @@ def _status(runtime: Runtime, as_json: bool) -> int:
             f"{item['flame_id']:<28} {item['account_id']:<18} "
             f"{item['status']:<16} {item.get('next_action_at') or '-'}"
         )
+        if item["automation_paused"]:
+            print("  PAUSED: waiting for explicit local intervention")
         if item.get("message"):
             print(f"  {item['message']}")
         delivery = item.get("notification")
@@ -176,6 +188,7 @@ def _health(runtime: Runtime) -> int:
         json.dumps(
             {
                 "service_ok": True,
+                "remote_checked": False,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             },
             separators=(",", ":"),
@@ -224,24 +237,76 @@ def _error(message: str, error_type: str) -> int:
     return 1
 
 
+def _dry_run(args) -> int:
+    config = load_config(args.config)
+    if getattr(args, "flame", None) and not any(f.id == args.flame for f in config.flames):
+        raise ConfigError("configured flame not found")
+    print(json.dumps({"event": "dry_run", "command": args.command, "execution_enabled": False,
+                      "database_opened": False, "browser_opened": False,
+                      "flames": [{"id": f.id, "keeper": f.keeper, "account_id": f.account_id,
+                                  "enabled": f.enabled, "task": f.settings.get("task", "checkin"),
+                                  "timezone": f.schedule.timezone} for f in config.flames]},
+                     ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _control(runtime, args):
+    now = datetime.now(timezone.utc)
+    if args.command == "login" and (args.confirm or args.cancel):
+        identifier = args.confirm or args.cancel
+        if not runtime.storage.respond_login(identifier, confirm=bool(args.confirm), now=now):
+            raise ConfigError("login request is not waiting or has expired")
+        print(json.dumps({"event": "login_response_queued", "request_id": identifier}))
+        return 0
+    flame = next((f for f in runtime.config.flames if f.id == args.flame), None)
+    if flame is None:
+        raise ConfigError("--flame must name a configured Flame")
+    if args.command == "resume":
+        runtime.storage.resume(flame.keeper, flame.account_id, flame.id)
+        runtime.storage.request_inspection(flame.id, flame.account_id, now)
+        if args.account:
+            runtime.storage.resume(flame.keeper, flame.account_id, "*")
+            for target in runtime.config.flames:
+                if (target.keeper, target.account_id) == (flame.keeper, flame.account_id):
+                    runtime.storage.request_inspection(target.id, target.account_id, now)
+        print(json.dumps({"event": "inspection_resumed", "flame_id": flame.id,
+                          "unconfirmed_actions_preserved": True}))
+    else:
+        if not isinstance(flame.settings.get("browser_profile_dir"), str) or not flame.settings["browser_profile_dir"]:
+            raise ConfigError("login requires a configured dedicated browser_profile_dir")
+        identifier = runtime.storage.request_login(flame.keeper, flame.account_id, flame.id, now)
+        runtime.storage.pause(flame.keeper, flame.account_id, "*", "login_requested", now)
+        print(json.dumps({"event": "login_requested", "request_id": identifier,
+                          "message": "The executing daemon must consume this request within 15 minutes; check status for waiting."}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    runtime = None
     try:
+        if args.command in ("run", "run-once", "login", "resume") and not args.execute:
+            return _dry_run(args)
         runtime = build_runtime(args.config)
         if args.command in ("run", "run-once"):
             with runtime.storage.execution_lock():
                 if args.command == "run":
                     return _run_daemon(runtime)
                 return _run_once(runtime, args.flame)
+        if args.command in ("login", "resume"):
+            return _control(runtime, args)
         if args.command == "status":
             return _status(runtime, args.as_json)
         if args.command == "health":
             return _health(runtime)
         raise AssertionError(f"unhandled command: {args.command}")
-    except (ConfigError, PluginError, StorageError) as exc:
+    except (ConfigError, PluginError, StorageError, AutomationPaused) as exc:
         return _error(str(exc), type(exc).__name__)
     except Exception as exc:
         return _error("command failed safely", type(exc).__name__)
+    finally:
+        if runtime is not None:
+            runtime.close()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,15 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ActionAttempt:
+    """Durable write intent; an unresolved attempt remains blocked across days."""
+    state: str
+    day: str
+    started_at: datetime
+    confirmed_at: datetime | None = None
+
+
 class KeepStatus(StrEnum):
     """The normalized outcome of one Keeper run."""
 

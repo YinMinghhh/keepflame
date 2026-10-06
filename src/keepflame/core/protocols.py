@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Mapping, Protocol, TypeVar
 
 from keepflame.core.models import (
+    ActionAttempt,
     FlameState,
     JsonValue,
     KeepResult,
@@ -25,7 +26,23 @@ class SecretResolver(Protocol):
     def read_text(self, reference: str) -> str: ...
 
 
+class AutomationPaused(RuntimeError):
+    """Explicit operator intervention is required before another inspection."""
+
+
 class Storage(Protocol):
+    def get_action(self, keeper: str, account_id: str, task: str) -> ActionAttempt | None: ...
+
+    def reserve_action(self, keeper: str, account_id: str, task: str, day: str, now: datetime) -> bool: ...
+
+    def confirm_action(self, keeper: str, account_id: str, task: str, now: datetime, *, day: str | None = None) -> None: ...
+
+    def is_paused(self, keeper: str, account_id: str, flame_id: str) -> bool: ...
+
+    def pause(self, keeper: str, account_id: str, scope: str, reason: str, now: datetime) -> None: ...
+
+    def resume(self, keeper: str, account_id: str, scope: str) -> None: ...
+
     def get_state(self, flame_id: str, account_id: str) -> FlameState | None: ...
 
     def list_states(self) -> list[FlameState]: ...

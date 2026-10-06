@@ -67,7 +67,7 @@ def test_cli_joinquant_human_loop_survives_restart(tmp_path, monkeypatch, capsys
         return runtime
 
     monkeypatch.setattr(cli, "build_runtime", factory)
-    assert cli.main(["run-once", "--config", str(config)]) == 2
+    assert cli.main(["run-once", "--execute", "--config", str(config)]) == 2
     first = json.loads(capsys.readouterr().out)
     assert first["status"] == "WAITING_HUMAN"
     assert first["human_action"]["kind"] == "COMPLETE_OFFICIAL_SIGNIN"
@@ -80,24 +80,24 @@ def test_cli_joinquant_human_loop_survives_restart(tmp_path, monkeypatch, capsys
 
     monkeypatch.setattr(cli, "_run_daemon", one_tick)
     clock.current = local(11, 9) + timedelta(minutes=1)
-    assert cli.main(["run", "--config", str(config)]) == 0
+    assert cli.main(["run", "--execute", "--config", str(config)]) == 0
     assert len(http.requests) == 1
     assert [e["event"] for e in captured.events] == ["human_action_required"]
     clock.current = local(11, 20)
-    assert cli.main(["run", "--config", str(config)]) == 0
+    assert cli.main(["run", "--execute", "--config", str(config)]) == 0
     assert captured.events[-1]["event"] == "human_action_reminder"
     clock.current = local(11, 21)
-    assert cli.main(["run", "--config", str(config)]) == 0
+    assert cli.main(["run", "--execute", "--config", str(config)]) == 0
     assert captured.events[-1]["event"] == "flame_recovered"
     assert cli.main(["status", "--config", str(config), "--json"]) == 0
     state = json.loads(capsys.readouterr().out)["flames"][0]
     assert state["status"] == "SUCCESS" and state["human_action"] is None
     assert state["notification"] is None
     clock.current = local(11, 22)
-    assert cli.main(["run", "--config", str(config)]) == 0
+    assert cli.main(["run", "--execute", "--config", str(config)]) == 0
     assert len(http.requests) == 3
     clock.current = local(12, 9)
-    assert cli.main(["run", "--config", str(config)]) == 0
+    assert cli.main(["run", "--execute", "--config", str(config)]) == 0
     assert captured.events[-1]["result"].human_action.kind == "REFRESH_SESSION"
     assert len(http.requests) == 4
     assert all(request.method == "GET" for request, _ in http.requests)
@@ -111,7 +111,7 @@ def test_cli_concurrent_runner_fails_before_secret_or_http(tmp_path, monkeypatch
     monkeypatch.setattr("keepflame.runtime.UrllibHttpClient", lambda: http)
     runtime = build_runtime(config)
     with runtime.storage.execution_lock():
-        assert cli.main(["run-once", "--config", str(config)]) == 1
+        assert cli.main(["run-once", "--execute", "--config", str(config)]) == 1
         error = json.loads(capsys.readouterr().err)
         assert error["error_type"] == "StorageError"
     assert http.requests == []

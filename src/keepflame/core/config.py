@@ -136,6 +136,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     flames: list[FlameConfig] = []
     seen_ids: set[str] = set()
+    seen_tasks: set[tuple[str, str, str]] = set()
     for index, item in enumerate(flames_raw):
         name = f"flames[{index}]"
         table = _expect_table(item, name)
@@ -149,7 +150,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ConfigError(f"duplicate flame id: {flame_id}")
         seen_ids.add(flame_id)
 
-        enabled = table.get("enabled", True)
+        enabled = table.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ConfigError(f"{name}.enabled must be true or false")
 
@@ -179,6 +180,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             key: _validate_json_value(value, f"{name}.settings.{key}")
             for key, value in settings_raw.items()
         }
+        task = settings.get("task", "checkin")
+        if not isinstance(task, str) or not task:
+            raise ConfigError(f"{name}.settings.task must be a non-empty string")
+        identity = (_required_text(table, "keeper", name), _required_text(table, "account_id", name), task)
+        if identity in seen_tasks:
+            raise ConfigError("duplicate keeper/account/task configuration")
+        seen_tasks.add(identity)
         flames.append(
             FlameConfig(
                 id=flame_id,

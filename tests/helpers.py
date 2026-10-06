@@ -5,7 +5,7 @@ from datetime import datetime
 from dataclasses import replace
 
 from keepflame.capabilities.http import HttpRequest, HttpResponse
-from keepflame.core.models import FlameState, KeepResult, PendingNotification, RunRecord
+from keepflame.core.models import ActionAttempt, FlameState, KeepResult, PendingNotification, RunRecord
 
 
 class FakeHttpClient:
@@ -37,9 +37,35 @@ class StaticSecrets:
 
 class MemoryStorage:
     def __init__(self) -> None:
+        self.actions = {}
+        self.pauses = {}
         self.states: dict[tuple[str, str], FlameState] = {}
         self.runs: list[RunRecord] = []
         self.notifications: dict[tuple[str, str], PendingNotification] = {}
+
+    def get_action(self, keeper, account_id, task):
+        return self.actions.get((keeper, account_id, task))
+
+    def reserve_action(self, keeper, account_id, task, day, now):
+        old = self.get_action(keeper, account_id, task)
+        if old is not None and (old.state == "pending" or old.day >= day):
+            return False
+        self.actions[(keeper, account_id, task)] = ActionAttempt("pending", day, now)
+        return True
+
+    def confirm_action(self, keeper, account_id, task, now, *, day=None):
+        old = self.get_action(keeper, account_id, task)
+        if old is not None and old.state == "pending":
+            self.actions[(keeper, account_id, task)] = replace(old, state="confirmed", confirmed_at=now, day=max(old.day, day or old.day))
+
+    def pause(self, keeper, account_id, scope, reason, now):
+        self.pauses[(keeper, account_id, scope)] = reason
+
+    def is_paused(self, keeper, account_id, flame_id):
+        return (keeper, account_id, "*") in self.pauses or (keeper, account_id, flame_id) in self.pauses
+
+    def resume(self, keeper, account_id, scope):
+        self.pauses.pop((keeper, account_id, scope), None)
 
     def get_state(self, flame_id: str, account_id: str) -> FlameState | None:
         return self.states.get((flame_id, account_id))

@@ -8,6 +8,8 @@ from typing import TextIO
 
 from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, UrllibHttpClient
 from keepflame.capabilities.browser import IsolatedBrowser, OwnedBrowserSession
+from keepflame.capabilities.browser_pool import BrowserPool
+from keepflame.login import LoginCoordinator
 from keepflame.core.config import AppConfig, load_config
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
@@ -24,12 +26,17 @@ class Runtime:
     notifier: JsonlNotifier
     orchestrator: Orchestrator
     service: SchedulerService
+    owned_browser: BrowserPool | None = None
+
+    def close(self):
+        if self.owned_browser is not None:
+            self.owned_browser.close()
 
 
 def build_runtime(
     config_path: str | Path | None = None, *, stream: TextIO | None = None,
     delivery_notifier: Notifier | None = None,
-    browser: IsolatedBrowser | OwnedBrowserSession | None = None,
+    browser: IsolatedBrowser | OwnedBrowserSession | BrowserPool | None = None,
 ) -> Runtime:
     config = load_config(config_path)
     storage = SQLiteStorage(config.storage.path)
@@ -38,10 +45,13 @@ def build_runtime(
     registry = EntryPointKeeperRegistry()
     for keeper_name in {flame.keeper for flame in config.enabled_flames()}:
         registry.resolve(keeper_name)
+    owned_browser = BrowserPool() if browser is None else None
+    browser_capability = browser if browser is not None else owned_browser
+    login = LoginCoordinator(config, storage, registry, browser_capability, clock=clock)
     orchestrator = Orchestrator(
         storage=storage,
         registry=registry,
-        capabilities=CapabilityRegistry({"http": UrllibHttpClient(), "browser": browser if browser is not None else IsolatedBrowser()}),
+        capabilities=CapabilityRegistry({"http": UrllibHttpClient(), "browser": browser_capability}),
         secrets=FileSecretResolver(),
         notifier=delivery_notifier if delivery_notifier is not None else notifier,
         clock=clock,
@@ -51,6 +61,8 @@ def build_runtime(
         storage=storage,
         orchestrator=orchestrator,
         clock=clock,
+        before_tick=login.tick,
+        blocked=login.blocked,
     )
     return Runtime(
         config=config,
@@ -58,4 +70,5 @@ def build_runtime(
         notifier=notifier,
         orchestrator=orchestrator,
         service=service,
+        owned_browser=owned_browser,
     )

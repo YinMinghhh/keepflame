@@ -17,6 +17,7 @@ from keepflame.core.models import (
     RunRecord,
 )
 from keepflame.core.protocols import (
+    AutomationPaused,
     CapabilityResolver,
     Clock,
     KeeperContext,
@@ -58,6 +59,8 @@ class Orchestrator:
         now: datetime | None = None,
         notify: bool = True,
     ) -> RunOutcome:
+        if self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
+            raise AutomationPaused("automation is paused; inspect status and resume explicitly")
         started_at = (now or self.clock.now()).astimezone(timezone.utc)
         previous = self.storage.get_state(flame.id, flame.account_id)
         pending = self.storage.get_notification(flame.id, flame.account_id)
@@ -133,6 +136,10 @@ class Orchestrator:
             )
         else:
             pending = None
+        if result.metadata.get("automation_paused") is True:
+            scope = "*" if result.metadata.get("pause_account") is True else flame.id
+            self.storage.pause(flame.keeper, flame.account_id, scope,
+                               str(result.metadata.get("reason", "human_action_required")), finished_at)
         self.storage.record(record, state, pending)
         if notify:
             self.deliver_pending(flame, now=finished_at)

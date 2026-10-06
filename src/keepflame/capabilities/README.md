@@ -10,4 +10,8 @@
 
 profile 登记还检查父目录可控、内部数据链接和所有权；扫描仅用文件元数据，不读浏览器数据内容。Chrome 根目录的 SingletonLock/SingletonSocket/SingletonCookie 链接不视为数据逃逸。聚宽请求预算留在聚宽插件的 guard.py，不扩展通用 browser capability 为站点防火墙。
 
-持久目录不保证没有有效期的会话 Cookie 在 Chrome 退出后保留。接入程序可在 `IsolatedBrowser.session(...)` 内让用户自行登录，然后把返回的 `OwnedBrowserSession` 传给 `build_runtime(..., browser=session)`，在同一个仍存活的浏览器中执行一次 Keeper。该句柄只允许原 profile、account_id、origin 使用一次；失败也消耗这次使用，退出外层上下文后失效并关闭浏览器。它保留登录窗口原来的显示模式，不重开浏览器、不扫描现有窗口或导出 Cookie。普通 `open()` 和 CLI 的默认行为不变。
+持久目录不保证没有有效期的会话 Cookie 在 Chrome 退出后保留。接入程序可在 `IsolatedBrowser.session(...)` 内让用户自行登录，然后把返回的 `OwnedBrowserSession` 传给 `build_runtime(..., browser=session)`，在同一个仍存活的浏览器中执行一次 Keeper。该句柄只允许原 profile、account_id、origin 使用一次；失败也消耗这次使用，退出外层上下文后失效并关闭浏览器。它保留登录窗口原来的显示模式，不重开浏览器、不扫描现有窗口或导出 Cookie。普通 `open()` 仍提供单次上下文；CLI 的常驻行为见下文。
+
+CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一上下文，检查 profile/account/origin 绑定，每轮关闭全部任务页，仅进程关闭时退出 Chrome。登录窗口与任务页串行；账号忙碌时拒绝借用。默认 GUI 模式供未来官方人工登录，测试可显式 headless。账号上限8，不自动重开失效上下文；单次 OwnedBrowserSession 接口仍供受控集成使用。
+
+服务器首次登记专用目录时（仅在另行获准后），目录必须是当前运行用户拥有的绝对路径、0700，父目录不可组/其他用户写，且位于任何Git仓库之外。新空目录内创建0600的 `.keepflame-profile.json`，内容严格为 `{"version":1,"account_id":"primary","purpose":"keepflame"}`，account_id须与配置一致。不要重用日常Chrome目录或修改已有profile归属。该标记只登记目录身份，不含凭据也不证明已登录；随后再用正式login控制流。

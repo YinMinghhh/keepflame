@@ -77,7 +77,7 @@ def test_run_once_exit_codes(
     fake_http = FakeHttpClient(response(200, payload))
     monkeypatch.setattr("keepflame.runtime.UrllibHttpClient", lambda: fake_http)
     exit_code = main(
-        ["run-once", "--config", str(config_file(tmp_path, cookie)), "--flame", "joinquant-primary"]
+        ["run-once", "--execute", "--config", str(config_file(tmp_path, cookie)), "--flame", "joinquant-primary"]
     )
     result = json.loads(capsys.readouterr().out)
     assert exit_code == expected_exit
