@@ -13,25 +13,20 @@ from keepflame.capabilities.http import HttpResponse
 from keepflame.core.models import HumanAction, KeepResult, KeepStatus
 from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
-
-CHALLENGE_PATH = "/common/verifyCode/captchar"
-
-
-class FlowError(RuntimeError):
-    def __init__(self, reason: str, status: int | None = None, retry_after: str | None = None):
-        self.reason = reason
-        self.status = status
-        self.retry_after = retry_after
-        super().__init__(reason)
+from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
 
 
 class JoinQuantPage:
-    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN):
+    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None):
         self.page = page
         self.deadline = deadline
+        if origin != JOINQUANT_ORIGIN:
+            raise FlowError("unexpected_origin")
         self.origin = origin
+        self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch)
 
     def timeout(self, maximum=10_000):
+        self.guard.check()
         remaining = int((self.deadline - time.monotonic()) * 1000)
         if remaining <= 0:
             raise FlowError("time_budget")
@@ -49,27 +44,10 @@ class JoinQuantPage:
             raise FlowError("unexpected_origin")
 
     def inspect(self, now):
-        response = self.page.evaluate("""async ({origin, timeout}) => {
-            if (location.origin !== origin) throw new Error('origin');
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeout);
-            try {
-                const r = await fetch('/credits/task/getTaskInfo', {
-                    method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-                    headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
-                    signal: controller.signal
-                });
-                const body = await r.text();
-                if (body.length > 1048576) throw new Error('size');
-                return {status:r.status, body, headers:Object.fromEntries(r.headers)};
-            } finally { clearTimeout(timer); }
-        }""", {"origin": self.origin, "timeout": self.timeout()})
-        return JoinQuantKeeper._interpret(HttpResponse(
-            status=response["status"], url=self.origin + "/credits/task/getTaskInfo",
-            headers=response["headers"], body=response["body"].encode(),
-        ), now=now)
+        return JoinQuantKeeper._interpret(self.guard.read_status(), now=now)
 
     def challenge(self):
+        self.guard.arm_challenge()
         button = self.page.get_by_role("button", name="签到", exact=True)
         if button.count() != 1:
             raise FlowError("signin_button_changed")
@@ -92,7 +70,9 @@ class JoinQuantPage:
         except FlowError:
             raise
         except Exception as exc:
+            self.guard.check()
             raise FlowError("challenge_not_received") from exc
+        self.guard.check()
         body = response.body()
         if len(body) > 1_400_000:
             raise FlowError("challenge_size")
@@ -112,7 +92,8 @@ class JoinQuantPage:
         return payload, uri
 
     def submit(self, x: int):
-        # Challenge token remains in browser memory; never return/log/persist it.
+        self.guard.arm_validation(x)
+        # Challenge token is confined to per-attempt memory; never return/log/persist it.
         result = self.page.evaluate("""async ({origin, x, timeout}) => {
             if (location.origin !== origin) return {reason:'unexpected_origin'};
             const buttons = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '签到');
@@ -143,12 +124,14 @@ class JoinQuantPage:
             } catch { return {reason:'validation_unconfirmed'}; }
             finally { clearTimeout(timer); }
         }""", {"origin": self.origin, "x": x, "timeout": self.timeout()})
+        self.guard.check()
         if result.get("accepted") is not True:
             # Only fixed local reason codes cross the browser boundary.
             reasons = {"unexpected_origin", "signin_button_changed", "site_callback_changed",
                        "validation_http", "validation_shape", "challenge_answer_rejected", "validation_unconfirmed"}
             reason = result.get("reason")
             raise FlowError(reason if reason in reasons else "validation_unconfirmed", result.get("status"), result.get("retry_after"))
+        self.guard.wait_for_signin()
 
 
 class JoinQuantBrowserKeeper:
@@ -162,7 +145,7 @@ class JoinQuantBrowserKeeper:
         next_action = context.now + timedelta(hours=24 if human else 6)
         if isinstance(retry_after, str) and len(retry_after) <= 128:
             remote_limit = JoinQuantKeeper._retry_after(HttpResponse(
-                status=status, url=JOINQUANT_ORIGIN, headers={"retry-after":retry_after}, body=b"",
+                status=429 if status in (401,403) else status, url=JOINQUANT_ORIGIN, headers={"retry-after":retry_after}, body=b"",
             ), context.now)
             if remote_limit is not None:
                 next_action = max(next_action, remote_limit)
@@ -212,7 +195,7 @@ class JoinQuantBrowserKeeper:
                 try:
                     payload, piece = gateway.challenge()
                 except FlowError as exc:
-                    if exc.status is not None:
+                    if exc.status is not None or exc.reason not in {"signin_button_changed", "challenge_not_received"}:
                         raise
                     # Some site versions can complete without a challenge. A missing
                     # widget/button alone is never interpreted as success.

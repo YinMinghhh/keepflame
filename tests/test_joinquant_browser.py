@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("KEEPFLAME_SYNTHETIC_BROWSER") !=
 from keepflame.capabilities import CapabilityRegistry
 from keepflame.core.models import KeepStatus
 from keepflame.core.protocols import KeeperContext
-from keepflame.flames.joinquant.browser import JoinQuantBrowserKeeper
+from keepflame.flames.joinquant.browser import JoinQuantBrowserKeeper, JoinQuantPage
 from tests.helpers import MemoryStorage, StaticSecrets
 from tests.test_orchestrator import local
 
@@ -29,7 +29,7 @@ button.addEventListener('click', async () => {
   document.querySelector('#yth_captchar').style.display = 'block';
 });
 button.__vue__ = {getToken: async value => {
-  const result = await fetch('/synthetic/complete', {method:'POST', body:value});
+  const result = await fetch('/credits/task/receiveCredits', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams({ruleKey:'login',valideCode:value,appKey:'synthetic-key',appSecret:'synthetic-secret'})});
   if (result.ok) {
     document.querySelector('#state').textContent='BACKEND CONFIRMED';
     document.querySelector('#yth_captchar').style.display='none';
@@ -71,12 +71,28 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
             answer = parse_qs(request.post_data or "").get('axisX')
             assert answer == [str(expected[0])]
             return route.fulfill(json={"data":{"result":True,"token":"synthetic-ephemeral-value"}})
-        if parsed.path == "/synthetic/complete":
-            assert request.post_data == "synthetic-ephemeral-value"
+        if parsed.path == "/credits/task/receiveCredits":
+            assert parse_qs(request.post_data)["valideCode"] == ["synthetic-ephemeral-value"]
             remote["signed"] = complete
-            return route.fulfill(status=200 if complete else 500, body="synthetic response")
+            return route.fulfill(json={"code":"00000"})
         unexpected.append(parsed.path)
         route.abort("blockedbyclient")
+
+    def request_fetch(source, *, timeout):
+        class MemoryRoute:
+            request = source.request
+            def fulfill(self, *, status=200, headers=None, content_type=None, body=None, json=None):
+                import json as jsonlib
+                result_headers = dict(headers or {})
+                if json is not None:
+                    body = jsonlib.dumps(json)
+                    content_type = "application/json"
+                if content_type:
+                    result_headers["content-type"] = content_type
+                return status, {k.lower():v for k,v in result_headers.items()}, body.encode() if isinstance(body,str) else body or b""
+            def abort(self, *_):
+                raise AssertionError("unexpected synthetic native request")
+        return route_request(MemoryRoute())
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -100,7 +116,7 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
                 secrets=StaticSecrets(AssertionError("no credentials allowed")),
                 storage=MemoryStorage(), now=local(11,9),
             )
-            result = JoinQuantBrowserKeeper().keep(context)
+            result = JoinQuantBrowserKeeper(page_factory=lambda page, deadline: JoinQuantPage(page, deadline=deadline, request_fetch=request_fetch)).keep(context)
             expected_status = KeepStatus.SUCCESS if complete else KeepStatus.WAITING_HUMAN if case == "expired" else KeepStatus.FAILED
             assert result.status is expected_status
             if complete:
@@ -108,9 +124,9 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
                 assert page.locator('#state').inner_text() == "BACKEND CONFIRMED"
             else:
                 assert result.metadata["reason"] == {
-                    "unconfirmed":"completion_unconfirmed", "challenge_429":"challenge_rejected",
+                    "unconfirmed":"completion_unconfirmed", "challenge_429":"challenge_http",
                     "validation_429":"validation_http", "callback_changed":"site_callback_changed",
-                    "expired":"session_refresh_required",
+                    "expired":"status_http",
                 }[case]
             if case in ("challenge_429", "validation_429"):
                 assert result.next_action_at == local(12 if case == "challenge_429" else 13, 9)

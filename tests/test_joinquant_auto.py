@@ -257,3 +257,28 @@ def test_owned_browser_restricts_destinations_and_closes_on_error(monkeypatch, t
     closed = []
     calls["websocket"](SimpleNamespace(close=lambda:closed.append(True)))
     assert closed == [True]
+
+
+@pytest.mark.parametrize("entry", ["Default", "Local State", "Default/Network/Cookies", "Default/Sessions/session-file"])
+def test_profile_rejects_internal_data_links_without_reading_target(tmp_path, entry):
+    profile=tmp_path/"profile"
+    enroll_synthetic(profile)
+    external=tmp_path/"unrelated-synthetic-data"
+    external.mkdir()
+    sentinel=external/"sentinel"
+    sentinel.write_text("synthetic untouched value")
+    link=profile/entry
+    link.parent.mkdir(parents=True,exist_ok=True)
+    link.symlink_to(external if entry=="Default" else sentinel)
+    with pytest.raises(ProfileNotAuthorized):
+        validate_profile(str(profile),"synthetic")
+    assert sentinel.read_text()=="synthetic untouched value"
+
+
+def test_profile_allows_chrome_singleton_lock_links(tmp_path):
+    profile=tmp_path/"profile"
+    enroll_synthetic(profile)
+    (profile/"SingletonLock").symlink_to("synthetic-host-12345")
+    (profile/"SingletonSocket").symlink_to("/tmp/synthetic-no-socket")
+    (profile/"SingletonCookie").symlink_to("synthetic-cookie-marker")
+    assert validate_profile(str(profile),"synthetic")==profile

@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import os
+import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -36,6 +37,30 @@ def validate_profile(reference: str, account_id: str) -> Path:
         raise ProfileNotAuthorized("invalid browser profile enrollment") from exc
     if data != {"version": 1, "account_id": account_id, "purpose": "keepflame"}:
         raise ProfileNotAuthorized("browser profile belongs to a different account or purpose")
+    # Inspect metadata only; never open browser databases or follow data links.
+    parent = path.parent.stat()
+    if parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+        raise ProfileNotAuthorized("browser profile parent must be controlled by this user")
+    pending = [path]
+    inspected = 0
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                inspected += 1
+                if inspected > 50_000:
+                    raise ProfileNotAuthorized("browser profile metadata limit")
+                if entry.is_symlink():
+                    if directory == path and entry.name in {"SingletonLock", "SingletonSocket", "SingletonCookie"}:
+                        continue
+                    raise ProfileNotAuthorized("browser data must not contain symbolic links")
+                metadata = entry.stat(follow_symlinks=False)
+                if metadata.st_uid != os.getuid():
+                    raise ProfileNotAuthorized("browser data must belong to this user")
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append(Path(entry.path))
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                    raise ProfileNotAuthorized("browser data must not contain hard-linked files")
     return path
 
 
