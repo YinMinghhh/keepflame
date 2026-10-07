@@ -21,7 +21,7 @@ from tests.test_orchestrator import local
 pytestmark = pytest.mark.skipif(os.environ.get("KEEPFLAME_SYNTHETIC_BROWSER") != "1", reason="opt-in isolated Chrome test")
 
 
-@pytest.mark.parametrize("case", ["read_then_claim", "already_claimable", "unconfirmed", "wrong_rule", "paid_article", "other_article"])
+@pytest.mark.parametrize("case", ["read_then_claim", "already_claimable", "unconfirmed", "wrong_rule", "paid_article", "other_article", "unknown_startup_write"])
 def test_reading_original_page_and_claim_gates(case):
     from playwright.sync_api import sync_playwright
     payload, piece, expected = fixtures()
@@ -31,6 +31,12 @@ def test_reading_original_page_and_claim_gates(case):
     post_id = "99999" if case == "other_article" else "12345"
     article_html = '''<!doctype html><meta charset="utf-8"><title>Synthetic article</title>
       <article>This text is synthetic. No real article or account is used.</article><script>
+      // The official created() hook starts this optional POST before reading.
+      const request = new XMLHttpRequest();
+      request.open('POST', '/algorithm/index/runList');
+      request.onerror = () => { window.algorithmListBlocked = true; };
+      request.send();
+      EXTRA_STARTUP
       fetch('/community/post/detailV2?postId=12345');
       setTimeout(async () => {
         await fetch('/user/account/getToken');
@@ -38,7 +44,8 @@ def test_reading_original_page_and_claim_gates(case):
           headers:{'Content-Type':'application/x-www-form-urlencoded'},
           body:new URLSearchParams({postId:'POST_ID',appKey:'synthetic',appSecret:'synthetic'})});
       }, 6000);
-      </script>'''.replace("POST_ID", post_id)
+      </script>'''.replace("POST_ID", post_id).replace("EXTRA_STARTUP",
+        "fetch('/synthetic/unexpected-write', {method:'POST'}).catch(()=>{});" if case == "unknown_startup_write" else "")
     credits_html = '''<!doctype html><meta charset="utf-8"><title>Synthetic credits</title>
       <div class="floor-credit-card"><span class="header-title">Other task</span><button>立即领取</button></div>
       <div class="floor-credit-card"><span class="header-title">浏览社区文章</span><div id="actions"></div></div>
@@ -120,11 +127,13 @@ def test_reading_original_page_and_claim_gates(case):
             session.new_page().close()
             counts = result.metadata["stage_counts"]
             assert counts["answer"] <= 1 and counts["claim"] <= 1 and counts["page_status"] <= 1
+            assert ("POST", "/algorithm/index/runList") not in requests
             assert "synthetic-only" not in json.dumps(result.metadata)
             if case in {"read_then_claim", "already_claimable"}:
                 assert result.status is KeepStatus.SUCCESS and remote["complete"] is True
                 assert counts["claim"] == counts["answer"] == 1
                 assert counts["reading_registration"] == (case == "read_then_claim")
+                assert counts["blocked_algorithm_list"] == (case == "read_then_claim")
             else:
                 assert result.status is not KeepStatus.SUCCESS and result.metadata["automation_paused"]
             if case == "wrong_rule":
@@ -133,6 +142,14 @@ def test_reading_original_page_and_claim_gates(case):
                 assert ("POST", READING_PATH) not in requests and counts["answer"] == counts["claim"] == 0
             if case == "unconfirmed":
                 assert result.metadata["reason"] == "claim_unconfirmed"
+                assert storage.get_action("joinquant", "synthetic", "reading").state == "pending"
+            if case == "unknown_startup_write":
+                assert ("POST", "/synthetic/unexpected-write") not in requests
+                assert result.metadata["reason"] == "unexpected_write"
+                assert result.metadata["blocked_request"]["endpoint"] == "unknown"
+                assert result.metadata["blocked_request"]["phase"] == "reading"
+                assert counts["blocked_algorithm_list"] == 1
+                assert counts["reading_registration"] == counts["challenge"] == counts["claim"] == 0
                 assert storage.get_action("joinquant", "synthetic", "reading").state == "pending"
         finally:
             browser.close()

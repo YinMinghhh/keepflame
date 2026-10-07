@@ -281,6 +281,29 @@ def test_pool_reverse_binding_and_idle_gate():
     pool.close()
 
 
+def test_disabled_idle_runtime_and_borrower_close_keep_the_owner_context(tmp_path):
+    import io
+    from keepflame.runtime import build_runtime
+    path = write_config(tmp_path, BASE_CONFIG.replace('enabled = true', 'enabled = false'))
+    source = Browser()
+    pool = BrowserPool(source)
+    runtime = build_runtime(path, stream=io.StringIO(), browser=pool)
+    try:
+        with pool.open(**OPTIONS) as page:
+            original = page.context
+        assert page.closed and not original.closed and not original.pages
+        assert runtime.service.run_due(now=NOW + timedelta(days=2)) == ([], None)
+        runtime.close()  # Borrowers do not own the long-lived account context.
+        assert not original.closed and not original.pages
+        with pool.open(**OPTIONS) as second:
+            assert second.context is original
+        assert second.closed and len(source.launches) == 1
+    finally:
+        runtime.close()
+        pool.close()
+    assert original.closed
+
+
 def test_reload_enables_tasks_without_restarting_browser_and_rejects_db_change(tmp_path, monkeypatch):
     import io
     from keepflame.runtime import build_runtime

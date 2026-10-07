@@ -17,3 +17,5 @@
 `test_runtime_control.py` 验证默认 dry-run 不初始化资源、原子动作意图、跨日/重启/恢复不重领、账号暂停、正式登录队列及同一上下文复用。显式 Chrome 测试只使用 fixture.invalid 的内存合成页面和空 profile，DNS 全拒绝，证明 HttpOnly 会话 Cookie 可连续供两个任务页使用且未导出。部署工具测试仅在临时合成 Git 仓库操作。
 
 `test_review_runtime.py` / `test_review_reading.py` 保留独立复核发现的反例：登录窗口崩溃重开、请求/暂停竞态、popup和关闭失败时的门禁、document重定向及未知响应值进入SQLite。修复后这些安全性质必须持续成立。
+
+`test_joinquant_request_diagnostics.py` 检查原文章 runList POST 只能被本地阻断一次，范围变化仍停止；首个致命请求的固定标签不泄漏未知 URL/参数/header/body，且经过 Keeper、CLI 和 JSONL 后仍保留。阅读 Chrome fixture 包含初始化 XHR 失败与未知写反例，确认前者不会阻止原页自然阅读，后者保留 pending 并停止。运行时回归另确认任务全部停用、idle 或借用者关闭 runtime 时上下文仍属于原 pool，由 owner 明确关闭。

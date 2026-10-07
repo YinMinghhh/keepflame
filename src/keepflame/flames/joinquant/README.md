@@ -33,7 +33,9 @@ reading_wait_seconds = 30
 
 拼图从响应内存解码，Pillow 图像以 finally/ExitStack 关闭，求解后的图像 URI 引用及时释放；没有真实图片文件或调试截图。浏览器自己的缓存、崩溃日志和 profile 不因此保证完全无落盘；不删除既存用户数据以制造该保证。
 
-不保存账号响应全文、任意字段、token、签名参数或 cookie。结果只保留固定状态/类型、阶段计数、错误码及任务枚举。配置/Profile 必须留在仓库和发布包之外；邮件功能本轮暂停。
+不保存账号响应全文、任意字段、token、签名参数或 cookie。结果只保留固定状态/类型、阶段计数、错误码及任务枚举。首次导致本轮停止的页面请求另以 `blocked_request` 保存固定标签：方法、origin 类别、已知 endpoint、发生阶段、资源类型、frame 关系及 query/fragment 存在与否；未知值归为 other/unknown，不保存 URL、body 或 header。后续请求及清理不能覆盖首次失败证据，CLI JSON、持久结果和 JSONL 通知保留该字段。配置/Profile 必须留在仓库和发布包之外；邮件功能本轮暂停。
+
+官方文章初始化的 `POST /algorithm/index/runList` 是一个精确的本地阻断例外：阅读阶段、首次文章导航后的原任务主 frame、精确官方 URL、空 POST、xhr/fetch、每轮最多一次时，只 abort 并增加 `stage_counts.blocked_algorithm_list`，不终止阅读。请求仍不发给服务器，也不返回伪造成功；重复、参数/来源/阶段变化及其他未知写请求继续停止。该计数与 `blocked_request` 不同：前者是容忍的本地阻断，后者是导致停机的首个请求。阅读资格及领取规则保持不变，现有 pending 不会被修复清除。
 
 ## 验证
 

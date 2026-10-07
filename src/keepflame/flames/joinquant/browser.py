@@ -367,6 +367,8 @@ class JoinQuantBrowserKeeper:
             result = self._stop(context, exc.reason, human=exc.status in (401, 403),
                                 status=exc.status, retry_after=exc.retry_after,
                                 paused=progress["reserved"] or exc.status not in (429, 502, 503, 504))
+            if exc.blocked_request is not None:
+                result = replace(result, metadata={**result.metadata, "blocked_request": exc.blocked_request})
         except Exception:
             result = self._stop(context, "browser_operation_failed", paused=True)
         metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"]}
@@ -374,11 +376,15 @@ class JoinQuantBrowserKeeper:
             metadata["automation_paused"] = True
         if gateway is not None and hasattr(gateway, "guard"):
             counts = gateway.guard.counts
+            failure = getattr(gateway.guard, "failure", None)
+            if failure is not None and failure.blocked_request is not None:
+                metadata["blocked_request"] = failure.blocked_request
             metadata["stage_counts"] = {
                 "status": counts["status"], "page_status": counts["page_status"],
                 "reading_registration": counts["/community/post/postView"],
                 "challenge": counts["/common/verifyCode/captchar"],
                 "answer": counts["/common/verifyCode/validate"],
                 "claim": counts["/credits/task/receiveCredits"],
+                "blocked_algorithm_list": counts["blocked_algorithm_list"],
             }
         return replace(result, metadata=metadata)

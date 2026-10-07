@@ -15,12 +15,24 @@ SIGNIN_PATH = "/credits/task/receiveCredits"
 TOKEN_PATH = "/user/account/getToken"
 READING_PATH = "/community/post/postView"
 ARTICLE_INFO_PATH = "/community/post/detailV2"
+ALGORITHM_LIST_PATH = "/algorithm/index/runList"
 WRITE_PATHS = {CHALLENGE_PATH, VALIDATE_PATH, SIGNIN_PATH}
+_ENDPOINTS = {
+    CHALLENGE_PATH: "challenge", VALIDATE_PATH: "validation", SIGNIN_PATH: "claim",
+    TOKEN_PATH: "account_signature", READING_PATH: "reading_registration",
+    ARTICLE_INFO_PATH: "article_info", ALGORITHM_LIST_PATH: "algorithm_list",
+    "/credits/task/getTaskInfo": "task_status", "/user/index/isLogin": "login_status",
+    "/view/user/floor": "credits_document",
+}
+_PHASES = {"loading", "inspect", "reading", "challenge", "validate", "submit", "confirm", "stopped"}
+_METHODS = {"GET", "POST", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"}
+_RESOURCE_TYPES = {"document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "websocket", "other"}
 
 
 class FlowError(RuntimeError):
-    def __init__(self, reason, status=None, retry_after=None):
+    def __init__(self, reason, status=None, retry_after=None, *, blocked_request=None):
         self.reason, self.status, self.retry_after = reason, status, retry_after
+        self.blocked_request = blocked_request
         super().__init__(reason)
 
 
@@ -70,9 +82,35 @@ class SignInGuard:
         if time.monotonic() >= self.deadline:
             raise FlowError("time_budget")
 
-    def stop(self, reason, status=None, retry_after=None):
+    def _request_diagnostic(self, request):
+        """Only fixed labels and booleans; never retain a URL, header or body."""
+        parsed = urlsplit(request.url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        endpoint = _ENDPOINTS.get(parsed.path, "unknown")
+        if self.article_url and request.url == self.article_url:
+            endpoint = "article_document"
+        elif origin == JOINQUANT_ORIGIN and parsed.path.startswith("/user/login"):
+            endpoint = "login_document"
+        try:
+            frame = ("other_page" if request.frame.page is not self.page else
+                     "main_task" if request.frame is self.page.main_frame else "other_frame")
+        except Exception:
+            frame = "unavailable"
+        return {
+            "method": request.method if request.method in _METHODS else "other",
+            "origin": "official" if origin == JOINQUANT_ORIGIN else
+                      "cdn" if origin == "https://cdn.joinquant.com" else "other",
+            "endpoint": endpoint,
+            "phase": self.phase if self.phase in _PHASES else "unknown",
+            "resource_type": request.resource_type if request.resource_type in _RESOURCE_TYPES else "other",
+            "frame": frame,
+            "has_query": bool(parsed.query), "has_fragment": bool(parsed.fragment),
+        }
+
+    def stop(self, reason, status=None, retry_after=None, *, request=None):
         if self.failure is None:
-            self.failure = FlowError(reason, status, retry_after)
+            self.failure = FlowError(reason, status, retry_after,
+                blocked_request=self._request_diagnostic(request) if request is not None else None)
         self.phase = "stopped"
 
     def timeout(self):
@@ -150,6 +188,9 @@ class SignInGuard:
         if self.failure is not None:
             route.abort("blockedbyclient")
             return
+        if path == ALGORITHM_LIST_PATH:
+            self._block_algorithm_list(route)
+            return
         # Login has its own user-controlled browser phase; this guard never logs in.
         if method == "GET" and not parsed.fragment:
             if request.resource_type in {"script","stylesheet","image","font"} and origin in {
@@ -158,7 +199,7 @@ class SignInGuard:
                 route.fallback()
                 return
             if origin == JOINQUANT_ORIGIN and path.startswith("/user/login"):
-                self.stop("login_required", 401)
+                self.stop("login_required", 401, request=request)
                 route.abort("blockedbyclient")
                 return
             if origin == JOINQUANT_ORIGIN and self.phase == "reading":
@@ -176,7 +217,7 @@ class SignInGuard:
                     return
                 if path == TOKEN_PATH and not parsed.query:
                     if not self.article_allowed or self.counts["reading_token"]:
-                        self.stop("reading_token_budget")
+                        self.stop("reading_token_budget", request=request)
                     else:
                         self.counts["reading_token"] += 1
                         self.forward(route, "reading_token", 65_536)
@@ -199,25 +240,25 @@ class SignInGuard:
                     return
             if origin == JOINQUANT_ORIGIN and path == TOKEN_PATH and not parsed.query:
                 if self.phase != "submit" or self.counts[TOKEN_PATH]:
-                    self.stop("signin_token_budget")
+                    self.stop("signin_token_budget", request=request)
                 else:
                     self.counts[TOKEN_PATH] += 1
                     self.forward(route, "signin_token", 65_536)
                     return
             elif path in WRITE_PATHS or path == READING_PATH:
-                self.stop("write_method_changed")
+                self.stop("write_method_changed", request=request)
             # Page-generated reads cannot masquerade as our status confirmations.
             route.abort("blockedbyclient")
             return
         if origin != JOINQUANT_ORIGIN or parsed.query or parsed.fragment or method != "POST":
-            self.stop("unexpected_write")
+            self.stop("unexpected_write", request=request)
         elif path == READING_PATH:
             self._reading_request(route)
             return
         elif path not in WRITE_PATHS:
-            self.stop("unexpected_write")
+            self.stop("unexpected_write", request=request)
         elif self.counts[path]:
-            self.stop("write_budget_exceeded")
+            self.stop("write_budget_exceeded", request=request)
         elif path == CHALLENGE_PATH and self.phase == "challenge" and not request.post_data:
             self.counts[path] += 1
             self.forward(route, "challenge", 1_400_000)
@@ -233,9 +274,27 @@ class SignInGuard:
                 self.signin_request = request
                 self.forward(route, "signin", 65_536)
                 return
-            self.stop("signin_parameters_changed")
+            self.stop("signin_parameters_changed", request=request)
         else:
-            self.stop("write_phase_changed")
+            self.stop("write_phase_changed", request=request)
+        route.abort("blockedbyclient")
+
+    def _block_algorithm_list(self, route):
+        """The article's optional UI POST stays blocked, without stopping reading."""
+        request = route.request
+        try:
+            article_frame = (request.frame.page is self.page and request.frame is self.page.main_frame
+                             and request.frame.url == self.article_url)
+        except Exception:
+            article_frame = False
+        if (self.task == "reading" and self.phase == "reading" and self.article_url
+                and self.counts["article_navigation"] == 1 and article_frame
+                and request.url == JOINQUANT_ORIGIN + ALGORITHM_LIST_PATH
+                and request.method == "POST" and request.resource_type in {"xhr", "fetch"}
+                and request.post_data in (None, "") and not self.counts["blocked_algorithm_list"]):
+            self.counts["blocked_algorithm_list"] += 1
+        else:
+            self.stop("unexpected_write", request=request)
         route.abort("blockedbyclient")
 
     def _reading_request(self, route):
@@ -252,7 +311,7 @@ class SignInGuard:
                 or self.counts["reading_token"] != 1 or form is None
                 or set(form) != {"postId", "appKey", "appSecret"}
                 or form["postId"] != [self.article_id]):
-            self.stop("reading_parameters_changed")
+            self.stop("reading_parameters_changed", request=request)
             route.abort("blockedbyclient")
             return
         self.counts[READING_PATH] += 1
@@ -263,7 +322,7 @@ class SignInGuard:
             status, headers, body = self.fetch(route)
             self.check()
             if status != 200:
-                self.stop(kind + "_http", status, headers.get("retry-after"))
+                self.stop(kind + "_http", status, headers.get("retry-after"), request=route.request)
                 route.abort("blockedbyclient")
                 return
             if len(body) > limit:
@@ -301,10 +360,10 @@ class SignInGuard:
             clean_headers = {k:v for k,v in headers.items() if k.lower() not in {"content-encoding","content-length"}}
             route.fulfill(status=status, headers=clean_headers, body=body)
         except FlowError as exc:
-            self.stop(exc.reason, exc.status, exc.retry_after)
+            self.stop(exc.reason, exc.status, exc.retry_after, request=route.request)
             route.abort("blockedbyclient")
         except Exception:
-            self.stop(kind + "_transport")
+            self.stop(kind + "_transport", request=route.request)
             route.abort("blockedbyclient")
 
     def wait_for_signin(self):
