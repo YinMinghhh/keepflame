@@ -51,7 +51,7 @@ def test_action_intent_survives_restart_and_next_day_and_resume(tmp_path):
     assert second.get_action('keeper', 'primary', 'reading').state == 'pending'
     assert second.reserve_action('keeper', 'primary', 'checkin', '2026-10-06', NOW)
     assert second.reserve_action('keeper', 'other', 'reading', '2026-10-06', NOW)
-    second.confirm_action('keeper', 'primary', 'reading', NOW)
+    second.confirm_action('keeper', 'primary', 'reading', NOW, day='2026-10-06')
     assert not second.reserve_action('keeper', 'primary', 'reading', '2026-10-06', NOW)
     assert not second.reserve_action('keeper', 'primary', 'reading', '2026-10-05', NOW)
     assert second.reserve_action('keeper', 'primary', 'reading', '2026-10-07', NOW + timedelta(days=1))
@@ -253,12 +253,13 @@ def test_native_cookie_survives_formal_login_and_repeated_task_pages(tmp_path, m
     assert all(page.is_closed() for page in pages)
 
 
-def test_cross_day_confirmation_blocks_another_write_on_confirmation_day(tmp_path):
+def test_cross_day_confirmation_preserves_original_pending_and_blocks_another_write(tmp_path):
     store = SQLiteStorage(tmp_path / 'cross-day.sqlite3')
     assert store.reserve_action('k', 'a', 'reading', '2026-10-06', NOW)
     next_day = NOW + timedelta(days=1)
-    store.confirm_action('k', 'a', 'reading', next_day, day='2026-10-07')
-    assert store.get_action('k', 'a', 'reading').day == '2026-10-07'
+    original = store.get_action('k', 'a', 'reading')
+    assert not store.confirm_action('k', 'a', 'reading', next_day, day='2026-10-07')
+    assert store.get_action('k', 'a', 'reading') == original
     assert not store.reserve_action('k', 'a', 'reading', '2026-10-07', next_day)
 
 

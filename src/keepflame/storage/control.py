@@ -81,13 +81,13 @@ class ControlStorageMixin:
                                (keeper, account_id, task, day, timestamp))
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day=None):
-        if day is not None and date.fromisoformat(day).isoformat() != day:
+    def confirm_action(self, keeper, account_id, task, now, *, day):
+        if date.fromisoformat(day).isoformat() != day:
             raise ValueError("confirmation day must be an ISO calendar date")
         with self._connect() as connection:
-            connection.execute("""UPDATE action_attempts SET state='confirmed', confirmed_at=?, day=MAX(day, COALESCE(?, day))
-                WHERE keeper=? AND account_id=? AND task=? AND state='pending'""",
-                               (stamp(now), day, keeper, account_id, task))
+            return connection.execute("""UPDATE action_attempts SET state='confirmed', confirmed_at=?
+                WHERE keeper=? AND account_id=? AND task=? AND state='pending' AND day=?""",
+                                      (stamp(now), keeper, account_id, task, day)).rowcount == 1
 
     def is_paused(self, keeper, account_id, flame_id):
         with self._connect() as connection:

@@ -15,3 +15,5 @@ schema v4 新增 `daemon_owner` / `run_requests`，由 v1/v2/v3 保留原记录�
 新 daemon 在持有 execution_lock 及该 owner UUID 的专属 flock 后收拢旧请求；未开始的取消、已开始的标记 interrupted 并原子暂停对应 Flame，保留 action_attempts。正常退出同样收拢，浏览器关闭后才释放两把锁。不存在请求跨世代重放。入队需要当前 owner.active、通用 runner 锁及该 owner 的专属锁同时成立，防止普通 run-once 借通用锁冒充已崩溃的 daemon。
 
 专属锁文件为数据库旁的 `.daemon-UUID.lock`，只接受规范 UUID，0600且内容为空，正常退出移除。进程异常退出后系统释放 flock；残留文件存在或另一个世代持锁均不算当前 owner 在线。active 和两种锁快照都不是认证有效性、执行进度或未来完成保证。此修订不改变 schema v4，不增加凭据、网络端口或系统安全配置。
+
+动作确认必须显式提供原动作的 day，并按 keeper/account/task/day/pending 原子匹配，返回是否成功；确认不改写 day 或 started_at。错日、缺失或已确认记录不能被新观察覆盖。此修复不迁移 schema、不改既有记录，旧 pending 继续跨日阻止写操作。

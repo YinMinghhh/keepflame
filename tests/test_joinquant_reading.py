@@ -109,12 +109,13 @@ class JournalStorage(MemoryStorage):
         self.reservations += 1
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day=None):
+    def confirm_action(self, keeper, account_id, task, now, *, day):
         item = self.actions[(keeper, account_id, task)]
+        if item.state != "pending" or item.day != day:
+            return False
         item.state = "confirmed"
         item.confirmed_at = now
-        if day is not None:
-            item.day = max(item.day, day)
+        return True
 
 
 class Gateway:
@@ -160,17 +161,20 @@ def test_normal_read_then_qualified_claim_requires_backend_completion():
     assert storage.get_action("joinquant", "synthetic", "reading").state == "confirmed"
 
 
-def test_pending_cross_day_can_only_confirm_and_never_read_or_claim():
+def test_pending_cross_day_never_confirms_reads_or_claims():
     first, _, storage = execute_reading([reading(), reading()])
     assert first.status is KeepStatus.WAITING_HUMAN and first.metadata["reason"] == "claim_unconfirmed"
     result, page, _ = execute_reading([reading({"status": 0, "totalCount": 1})], storage=storage, now=local(12, 9))
     assert result.metadata["automation_paused"] is True and result.metadata["reason"] == "claim_unconfirmed"
     assert page.reads == page.claims == page.answers == page.opens == 0 and page.checks == 1
     result, page, _ = execute_reading([reading({"status": 1})], storage=storage, now=local(12, 10))
-    assert result.status is KeepStatus.SUCCESS and page.claims == 0
-    assert storage.get_action("joinquant", "synthetic", "reading").day == local(12, 10).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    assert result.status is KeepStatus.WAITING_HUMAN and page.claims == 0
+    assert result.metadata["unconfirmed_reason"] == "pending_different_day"
+    assert result.metadata["reading_state"] == "complete"
+    assert storage.get_action("joinquant", "synthetic", "reading").day == local(11, 9).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    assert storage.get_action("joinquant", "synthetic", "reading").state == "pending"
     result, page, _ = execute_reading([reading({"status": 0, "totalCount": 1})], storage=storage, now=local(12, 11))
-    assert result.metadata["unconfirmed_reason"] == "same_day_action_consumed" and page.claims == page.reads == 0
+    assert result.metadata["unconfirmed_reason"] == "pending_different_day" and page.claims == page.reads == 0
 
 
 def test_claim_ack_without_completion_is_paused_and_not_retried():

@@ -262,9 +262,13 @@ class JoinQuantBrowserKeeper:
 
         def complete(observation, automatic):
             if (action is not None and action.state == "pending") or progress["reserved"]:
-                context.storage.confirm_action("joinquant", context.account_id, task.name, context.now, day=day)
+                if not context.storage.confirm_action("joinquant", context.account_id, task.name, context.now, day=day):
+                    return self._unconfirmed(context, observation, cause="action_confirmation_rejected")
             return replace(observation, metadata={**observation.metadata, "automatic_action": automatic})
 
+        # A current-day observation cannot settle a different day's intent.
+        if action is not None and action.state == "pending" and action.day != day:
+            return self._unconfirmed(context, before, cause="pending_different_day")
         if before.status is KeepStatus.SUCCESS:
             return complete(before, False)
         # An uncertain previous write blocks every future write, even across days.

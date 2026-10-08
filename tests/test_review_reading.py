@@ -157,12 +157,14 @@ def test_real_sqlite_pending_only_inspects_after_restart_and_next_day(tmp_path):
     assert storage.get_action('joinquant', 'synthetic', 'reading').state == 'pending'
     gateway.inspect = lambda _: (calls.append('inspect') or reading_result({'status': 1}))
     result = JoinQuantBrowserKeeper()._run(context, gateway, TASK, {'reserved': False, 'action_stage': 'inspect'})
-    assert calls == ['inspect', 'inspect'] and result.status is KeepStatus.SUCCESS
+    assert calls == ['inspect', 'inspect'] and result.status is KeepStatus.WAITING_HUMAN
+    assert result.metadata['unconfirmed_reason'] == 'pending_different_day'
     action = storage.get_action('joinquant', 'synthetic', 'reading')
-    assert action.state == 'confirmed' and action.day == '2026-10-07'
+    assert action.state == 'pending' and action.day == '2026-10-06'
+    assert action.started_at == NOW and action.confirmed_at is None
     assert not storage.reserve_action('joinquant', 'synthetic', 'reading', '2026-10-07', context.now)
     record('durable-intent', {'inspection_only_after_restart': True, 'pending_blocks_next_day': True,
-                              'backend_completion_confirms': True, 'confirmation_day': action.day})
+                              'current_day_completion_preserves_pending': True, 'original_action_day': action.day})
 
 
 @pytest.mark.parametrize('value', ['SYNTHETIC_PRIVATE_ACCOUNT_VALUE', {'nested':'SYNTHETIC_PRIVATE_ACCOUNT_VALUE'}, 12345])

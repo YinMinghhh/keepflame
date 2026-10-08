@@ -53,10 +53,12 @@ class MemoryStorage:
         self.actions[(keeper, account_id, task)] = ActionAttempt("pending", day, now)
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day=None):
+    def confirm_action(self, keeper, account_id, task, now, *, day):
         old = self.get_action(keeper, account_id, task)
-        if old is not None and old.state == "pending":
-            self.actions[(keeper, account_id, task)] = replace(old, state="confirmed", confirmed_at=now, day=max(old.day, day or old.day))
+        if old is not None and old.state == "pending" and old.day == day:
+            self.actions[(keeper, account_id, task)] = replace(old, state="confirmed", confirmed_at=now)
+            return True
+        return False
 
     def pause(self, keeper, account_id, scope, reason, now):
         self.pauses[(keeper, account_id, scope)] = reason

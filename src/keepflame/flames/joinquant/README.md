@@ -47,3 +47,5 @@ KEEPFLAME_SYNTHETIC_BROWSER=1 .venv/bin/python -m pytest tests/test_joinquant_re
 ```
 
 阅读目前仅公开源码依据+离线/合成 Chrome 验证，未使用真实账号观察资格或领取。官方 DOM/回调变化时停止，不临时放宽门禁。平台协议限制未经授权第三方接入，技术实现不代表平台许可。精确接口与公开依据见 [PROTOCOL.md](PROTOCOL.md)。
+
+当前日状态不能证明其他日期的未决动作完成。已有 pending 的 day 与本轮北京时间业务日不一致时，即使观察到 complete，也保留观察元数据并返回 WAITING_HUMAN / pending_different_day，继续暂停；不读取文章、不挑战、不领取、不确认旧动作。只有同日且存储原子确认成功才收敛该 pending；存储拒绝则以 action_confirmation_rejected 停止。
