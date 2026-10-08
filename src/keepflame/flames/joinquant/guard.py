@@ -37,11 +37,12 @@ class FlowError(RuntimeError):
 
 
 class SignInGuard:
-    def __init__(self, page, *, deadline, request_fetch=None, task="checkin"):
+    def __init__(self, page, *, deadline, request_fetch=None, task="checkin", date_fence=None):
         if task not in ("checkin", "reading"):
             raise FlowError("task_configuration")
         self.page, self.deadline = page, deadline
         self.task = task
+        self.date_fence = date_fence
         self.rule = "post_view" if task == "reading" else "login"
         self.request_fetch = request_fetch  # Synthetic transport injection, never a config option.
         self.phase = "loading"
@@ -79,6 +80,8 @@ class SignInGuard:
     def check(self):
         if self.failure is not None:
             raise self.failure
+        if self.date_fence is not None:
+            self.date_fence.check()
         if time.monotonic() >= self.deadline:
             raise FlowError("time_budget")
 
@@ -122,7 +125,10 @@ class SignInGuard:
         timeout = self.timeout()
         if self.request_fetch is not None:
             source = route or SimpleNamespace(request=HttpRequest(method="GET", url=TASK_INFO_URL))
-            return self.request_fetch(source, timeout=timeout)
+            result = self.request_fetch(source, timeout=timeout)
+            if self.date_fence is not None:
+                self.date_fence.response(result[1])
+            return result
         response = None
         try:
             if route is not None:
@@ -132,6 +138,8 @@ class SignInGuard:
                     max_redirects=0, max_retries=0,
                     headers={"Accept":"application/json", "X-Requested-With":"XMLHttpRequest", "Cache-Control":"no-cache"})
             headers = {k.lower():v for k,v in response.headers.items()}
+            if self.date_fence is not None:
+                self.date_fence.response(headers)
             # Error bodies cannot influence local status and need not be retained.
             body = response.body() if response.status == 200 else b""
             return response.status, headers, body
@@ -147,6 +155,8 @@ class SignInGuard:
         self.counts["status"] += 1
         try:
             status, headers, body = self.fetch()
+        except FlowError:
+            raise
         except Exception:
             self.stop("status_transport")
             self.check()
@@ -185,6 +195,10 @@ class SignInGuard:
         parsed = urlsplit(request.url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         path, method = parsed.path, request.method
+        try:
+            self.check()
+        except FlowError as exc:
+            self.stop(exc.reason, request=request)
         if self.failure is not None:
             route.abort("blockedbyclient")
             return

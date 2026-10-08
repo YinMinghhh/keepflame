@@ -116,7 +116,7 @@ def test_real_chrome_automatic_flow_without_external_io(tmp_path, case):
                 secrets=StaticSecrets(AssertionError("no credentials allowed")),
                 storage=MemoryStorage(), now=local(11,9),
             )
-            result = JoinQuantBrowserKeeper(page_factory=lambda page, deadline: JoinQuantPage(page, deadline=deadline, request_fetch=request_fetch)).keep(context)
+            result = JoinQuantBrowserKeeper(page_factory=lambda page, deadline, date_fence: JoinQuantPage(page, deadline=deadline, request_fetch=request_fetch, date_fence=date_fence)).keep(context)
             expected_status = KeepStatus.SUCCESS if complete else KeepStatus.WAITING_HUMAN if case in ("expired", "unconfirmed") else KeepStatus.FAILED
             assert result.status is expected_status
             if complete:

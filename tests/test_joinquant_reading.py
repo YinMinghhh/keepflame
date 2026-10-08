@@ -100,7 +100,8 @@ class JournalStorage(MemoryStorage):
     def get_action(self, keeper, account_id, task):
         return self.actions.get((keeper, account_id, task))
 
-    def reserve_action(self, keeper, account_id, task, day, now):
+    def reserve_action(self, keeper, account_id, task, day, now, *, validate_time=None):
+        if validate_time is not None: validate_time()
         key = keeper, account_id, task
         previous = self.actions.get(key)
         if previous and (previous.state == "pending" or previous.day == day):
@@ -109,7 +110,8 @@ class JournalStorage(MemoryStorage):
         self.reservations += 1
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day):
+    def confirm_action(self, keeper, account_id, task, now, *, day, validate_time=None):
+        if validate_time is not None: validate_time()
         item = self.actions[(keeper, account_id, task)]
         if item.state != "pending" or item.day != day:
             return False

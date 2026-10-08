@@ -112,7 +112,12 @@ def _browser_challenge_action() -> HumanAction:
     )
 
 
+from keepflame.flames.joinquant.archive import review_abandonment
+
+
 class JoinQuantKeeper:
+    archive_timezone = "Asia/Shanghai"
+    review_abandonment = staticmethod(review_abandonment)
     browser_origin = JOINQUANT_ORIGIN
     login_url = JOINQUANT_ORIGIN + "/user/login/index"
     login_blocked_paths = ("/credits/", "/common/verifyCode/", "/user/account/getToken", "/community/post/postView")

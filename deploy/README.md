@@ -112,3 +112,18 @@ python3.13 -I -B deploy/prepare.py plan \
 `tests/test_deploy.py` 在临时合成 Git 仓库和运行目录检查：默认零写入、冻结提交/干净树、忽略账号文件、敏感路径/链接拒绝、确定性摘要、篡改/穿越/重复条目拒绝、候选默认停用、预检只看元数据且不启动进程。测试不会访问真实 profile、外网、真实 SQLite 或其他项目端口；通过不代表服务器部署验收完成。
 
 配置文件内容改变或不可读时，daemon 会在本轮结束后的下一调度检查停止派发旧任务；即使修回原文件，也要显式合法 reload 才解除暂停。reload CLI 只打开已存在且兼容的状态库，不会因候选配置改了路径就新建库。数据库路径变更不受支持：修回原路径后再发请求并检查 completed。
+
+### 过期意图的审计归档（默认仅预览）
+
+这不是领取命令。先停止不兼容旧版本、备份规范化状态，在停用配置下完成 schema v5 受控升级；archive-action 自身仅接受已存在的 v5 库，不会启动Runtime、浏览器或做网络访问。使用 `actions --config ... --flame ...` 读取该任务的原始快照和归档历史。
+
+审阅证据 JSON 仅允许 `version:1`、完整40位 `source_revision` 和1至8个64位SHA256 `references`；保留这些原证据文件，禁止放入Cookie、token或页面内容。归档必须提供精确旧日与 started_at、稳定UUID；abandoned 另需同一原始运行的 run-id，并由 Keeper核验实际已落库零写计数。未知/已发送写入、来源未验证的记录只能 unknown，不释放预算。
+
+```sh
+python -m keepflame archive-action --config /path/to/disabled.toml --flame reading \
+  --day 2026-10-07 --started-at 2026-10-07T15:03:23.020423+00:00 \
+  --disposition unknown --request-id 11111111-1111-4111-8111-111111111111 \
+  --evidence /path/to/reviewed-digests.json
+```
+
+没有 --execute 时不会打开证据、数据库或浏览器。实际 --execute 只追加本地不可改写的决策与原run/暂停快照；unknown 可以追加后续证据，再以新UUID提出有证据的abandoned。原action行和所有原字段不改、不伪造confirmed、不改日期。归档不会resume、reload或排队领取；暂停原因必须另外核验并显式恢复检查，任务还须处于对应日期的已授权范围、配置启用、调度允许，并通过同上下文的实时资格查询。不要用resume作为不确定写入的重试许可，不把归档当作账号登录仍有效的证明。

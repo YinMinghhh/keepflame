@@ -49,3 +49,9 @@ KEEPFLAME_SYNTHETIC_BROWSER=1 .venv/bin/python -m pytest tests/test_joinquant_re
 阅读目前仅公开源码依据+离线/合成 Chrome 验证，未使用真实账号观察资格或领取。官方 DOM/回调变化时停止，不临时放宽门禁。平台协议限制未经授权第三方接入，技术实现不代表平台许可。精确接口与公开依据见 [PROTOCOL.md](PROTOCOL.md)。
 
 当前日状态不能证明其他日期的未决动作完成。已有 pending 的 day 与本轮北京时间业务日不一致时，即使观察到 complete，也保留观察元数据并返回 WAITING_HUMAN / pending_different_day，继续暂停；不读取文章、不挑战、不领取、不确认旧动作。只有同日且存储原子确认成功才收敛该 pending；存储拒绝则以 action_confirmation_rejected 停止。
+
+运行中业务日期由 Core 的实时 clock 提供，固定为本轮开始的上海日期。每次外部状态读取、耗时阅读、挑战、求解、提交前后以及最终确认都校验日期；请求门禁在每个页面请求和原生响应处也校验，HTTP Date 存在时必须同日。日期变化或时钟退回其他日期后锁定 business_day_changed，即使时间跳回也不重试，旧 intent 保持 pending。SQLite 事务中的日期检查失败会回滚。独立构造的 Context 未提供 clock 时以开始时间加单调时钟经过时间推进；生产 Orchestrator 始终传入实时 clock。
+
+归档证据审查仅接受失败/等待人工的同一运行记录、受支持守卫计数版本，以及登记/挑战/答案/领取四个整数计数全0，并限制为已知的停止原因。它只能证明这些守卫写请求未获放行，不能证明奖励成功或修复缺失的首拒路径。新记录携带 write_guard_schema=1；旧 acbe79b 的计数语义已逐源审查，须显式引用该完整source revision及证据SHA256。哈希是人工/代码审阅材料的定位依据，不是假定任意文件自带真实性证明。缺失计数、非0、布尔计数、其他旧源码或未知原因只能归档unknown并继续阻塞。
+
+abandoned 不自动恢复 Flame、不改变启用开关，也不跳过下一日的实时只读资格、门禁和单轮写预算。之前发送过或是否发送不明的动作不能通过此流程获得新预算。不得把昨日尚未用掉的一次真实验收授权自动扩展到新日期。

@@ -26,6 +26,10 @@ class SecretResolver(Protocol):
     def read_text(self, reference: str) -> str: ...
 
 
+class ArchiveError(ValueError):
+    """Evidence or identity cannot safely resolve an expired action intent."""
+
+
 class AutomationPaused(RuntimeError):
     """Explicit operator intervention is required before another inspection."""
 
@@ -33,9 +37,9 @@ class AutomationPaused(RuntimeError):
 class Storage(Protocol):
     def get_action(self, keeper: str, account_id: str, task: str) -> ActionAttempt | None: ...
 
-    def reserve_action(self, keeper: str, account_id: str, task: str, day: str, now: datetime) -> bool: ...
+    def reserve_action(self, keeper: str, account_id: str, task: str, day: str, now: datetime, *, validate_time=None) -> bool: ...
 
-    def confirm_action(self, keeper: str, account_id: str, task: str, now: datetime, *, day: str) -> bool: ...
+    def confirm_action(self, keeper: str, account_id: str, task: str, now: datetime, *, day: str, validate_time=None) -> bool: ...
 
     def is_paused(self, keeper: str, account_id: str, flame_id: str) -> bool: ...
 
@@ -83,6 +87,7 @@ class KeeperContext:
     secrets: SecretResolver
     storage: Storage
     now: datetime
+    clock: Clock | None = None
 
 
 class Keeper(Protocol):

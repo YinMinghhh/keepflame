@@ -11,8 +11,8 @@ from pathlib import Path
 
 from keepflame.core.config import ConfigError, FlameConfig, default_config_path, load_config
 from keepflame.core.models import FlameState, KeepStatus, RunOutcome
-from keepflame.core.plugins import PluginError
-from keepflame.core.protocols import AutomationPaused
+from keepflame.core.plugins import PluginError, EntryPointKeeperRegistry
+from keepflame.core.protocols import AutomationPaused, ArchiveError
 from keepflame.runtime import Runtime, build_runtime
 from keepflame.storage.sqlite import StorageError
 from keepflame.storage import SQLiteStorage
@@ -23,7 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="keepflame")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("run", "run-once", "status", "health", "login", "resume", "reload"):
+    for name in ("run", "run-once", "status", "health", "login", "resume", "reload", "archive-action", "actions"):
         command = subparsers.add_parser(name)
         command.add_argument(
             "--config",
@@ -31,9 +31,9 @@ def _parser() -> argparse.ArgumentParser:
             default=default_config_path(),
             help="runtime TOML configuration path",
         )
-        if name in ("run", "run-once", "login", "resume", "reload"):
+        if name in ("run", "run-once", "login", "resume", "reload", "archive-action"):
             command.add_argument("--execute", action="store_true", help="explicitly allow the requested operation; default is dry-run")
-        if name in ("run-once", "login", "resume"):
+        if name in ("run-once", "login", "resume", "archive-action", "actions"):
             command.add_argument("--flame", help="named Flame")
         if name == 'run-once':
             command.add_argument('--via-daemon', action='store_true',
@@ -45,6 +45,13 @@ def _parser() -> argparse.ArgumentParser:
             group = command.add_mutually_exclusive_group()
             group.add_argument("--confirm", metavar="REQUEST_ID")
             group.add_argument("--cancel", metavar="REQUEST_ID")
+        if name == 'archive-action':
+            command.add_argument('--day', required=True, help='original intent business date')
+            command.add_argument('--started-at', required=True, help='exact original intent timestamp')
+            command.add_argument('--disposition', choices=['unknown','abandoned'], required=True)
+            command.add_argument('--request-id', required=True, help='stable canonical UUID for this archive decision')
+            command.add_argument('--run-id', help='exact recorded run; required for abandoned')
+            command.add_argument('--evidence', type=Path, required=True, help='reviewed source commit and evidence digests only')
         if name == "status":
             command.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -300,8 +307,45 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError('--via-daemon requires --flame and a stable --request-id UUID')
             if args.request_id and not args.via_daemon:
                 raise ConfigError('--request-id requires --via-daemon')
-        if args.command in ("run", "run-once", "login", "resume", "reload") and not args.execute:
+        if args.command in ("run", "run-once", "login", "resume", "reload", "archive-action") and not args.execute:
             return _dry_run(args)
+        if args.command in ('archive-action', 'actions'):
+            config = load_config(args.config)
+            flame = next((f for f in config.flames if f.id == args.flame), None)
+            if flame is None:
+                raise ConfigError('--flame must identify a configured Flame')
+            storage = SQLiteStorage(config.storage.path, existing_only=True)
+            task = flame.settings.get('task', 'checkin')
+            if args.command == 'actions':
+                print(json.dumps(storage.action_audit(flame.keeper, flame.account_id, task), sort_keys=True))
+                return 0
+            def unique(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ArchiveError('duplicate archive evidence key')
+                    result[key] = value
+                return result
+            with args.evidence.open('rb') as handle:
+                raw = handle.read(8193)
+            if len(raw) > 8192:
+                raise ArchiveError('archive evidence exceeds size limit')
+            evidence = json.loads(raw, object_pairs_hook=unique)
+            review = None
+            if args.disposition == 'abandoned':
+                keeper = EntryPointKeeperRegistry().resolve(flame.keeper)
+                review = getattr(keeper, 'review_abandonment', None)
+                if not callable(review):
+                    raise ArchiveError('Keeper does not support evidence-based abandonment')
+                if flame.schedule.timezone != getattr(keeper, 'archive_timezone', flame.schedule.timezone):
+                    raise ArchiveError('archive requires the Keeper canonical business timezone')
+            archived = storage.archive_action(request_id=args.request_id, flame=flame, day=args.day,
+                started_at=datetime.fromisoformat(args.started_at), disposition=args.disposition,
+                evidence=evidence, now=datetime.now(timezone.utc), run_id=args.run_id, review=review)
+            print(json.dumps({'event':'action_archived', 'archive_id':archived['id'],
+                'disposition':archived['disposition'], 'history_id':archived['history_id'],
+                'action_original_preserved':True, 'pauses_changed':False, 'reward_executed':False}, sort_keys=True))
+            return 0
         if args.command == 'run-once' and args.via_daemon:
             config = load_config(args.config)
             flame = next((f for f in config.enabled_flames() if f.id == args.flame), None)
@@ -338,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "health":
             return _health(runtime)
         raise AssertionError(f"unhandled command: {args.command}")
-    except (ConfigError, PluginError, StorageError, AutomationPaused, DispatchError) as exc:
+    except (ConfigError, PluginError, StorageError, AutomationPaused, DispatchError, ArchiveError) as exc:
         return _error(str(exc), type(exc).__name__)
     except Exception as exc:
         return _error("command failed safely", type(exc).__name__)

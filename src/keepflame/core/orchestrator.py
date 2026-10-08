@@ -74,6 +74,7 @@ class Orchestrator:
                 secrets=self.secrets,
                 storage=self.storage,
                 now=started_at,
+                clock=self.clock,
             )
             result = keeper.keep(context)
         except Exception as exc:

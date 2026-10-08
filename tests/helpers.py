@@ -46,14 +46,16 @@ class MemoryStorage:
     def get_action(self, keeper, account_id, task):
         return self.actions.get((keeper, account_id, task))
 
-    def reserve_action(self, keeper, account_id, task, day, now):
+    def reserve_action(self, keeper, account_id, task, day, now, *, validate_time=None):
+        if validate_time is not None: validate_time()
         old = self.get_action(keeper, account_id, task)
         if old is not None and (old.state == "pending" or old.day >= day):
             return False
         self.actions[(keeper, account_id, task)] = ActionAttempt("pending", day, now)
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day):
+    def confirm_action(self, keeper, account_id, task, now, *, day, validate_time=None):
+        if validate_time is not None: validate_time()
         old = self.get_action(keeper, account_id, task)
         if old is not None and old.state == "pending" and old.day == day:
             self.actions[(keeper, account_id, task)] = replace(old, state="confirmed", confirmed_at=now)

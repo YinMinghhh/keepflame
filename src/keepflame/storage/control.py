@@ -60,34 +60,53 @@ class ControlStorageMixin:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
                                      (keeper, account_id, task)).fetchone()
+            abandoned = self._abandoned(connection, row) if row is not None else None
         if row is None:
             return None
-        return ActionAttempt(row['state'], row['day'], datetime.fromisoformat(row['started_at']),
+        return ActionAttempt('abandoned' if abandoned is not None else row['state'], row['day'], datetime.fromisoformat(row['started_at']),
                              None if row['confirmed_at'] is None else datetime.fromisoformat(row['confirmed_at']))
 
-    def reserve_action(self, keeper, account_id, task, day, now):
+    def reserve_action(self, keeper, account_id, task, day, now, *, validate_time=None):
         if date.fromisoformat(day).isoformat() != day:
             raise ValueError("action day must be an ISO calendar date")
         timestamp = stamp(now)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT state, day FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
+            row = connection.execute("SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
                                      (keeper, account_id, task)).fetchone()
-            if row is not None and (row['state'] == 'pending' or row['day'] >= day):
-                return False
+            if validate_time is not None:
+                validate_time()
+            if row is not None:
+                abandoned = self._abandoned(connection, row)
+                if row['day'] >= day or row['state'] == 'pending' and (abandoned is None or day < abandoned['business_day']):
+                    return False
             connection.execute("""INSERT INTO action_attempts VALUES (?,?,?,'pending',?,?,NULL)
                 ON CONFLICT(keeper,account_id,task) DO UPDATE SET
                 state='pending', day=excluded.day, started_at=excluded.started_at, confirmed_at=NULL""",
                                (keeper, account_id, task, day, timestamp))
+            if validate_time is not None:
+                validate_time()
         return True
 
-    def confirm_action(self, keeper, account_id, task, now, *, day):
+    def confirm_action(self, keeper, account_id, task, now, *, day, validate_time=None):
         if date.fromisoformat(day).isoformat() != day:
             raise ValueError("confirmation day must be an ISO calendar date")
         with self._connect() as connection:
-            return connection.execute("""UPDATE action_attempts SET state='confirmed', confirmed_at=?
+            connection.execute("BEGIN IMMEDIATE")
+            if validate_time is not None:
+                validate_time()
+            row = connection.execute("SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
+                                     (keeper, account_id, task)).fetchone()
+            if row is not None and connection.execute(
+                    'SELECT 1 FROM action_archives WHERE history_id=?',
+                    (self._history_id(connection, row),)).fetchone() is not None:
+                return False
+            changed = connection.execute("""UPDATE action_attempts SET state='confirmed', confirmed_at=?
                 WHERE keeper=? AND account_id=? AND task=? AND state='pending' AND day=?""",
                                       (stamp(now), keeper, account_id, task, day)).rowcount == 1
+            if validate_time is not None:
+                validate_time()
+            return changed
 
     def is_paused(self, keeper, account_id, flame_id):
         with self._connect() as connection:

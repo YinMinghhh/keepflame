@@ -17,3 +17,9 @@ schema v4 新增 `daemon_owner` / `run_requests`，由 v1/v2/v3 保留原记录�
 专属锁文件为数据库旁的 `.daemon-UUID.lock`，只接受规范 UUID，0600且内容为空，正常退出移除。进程异常退出后系统释放 flock；残留文件存在或另一个世代持锁均不算当前 owner 在线。active 和两种锁快照都不是认证有效性、执行进度或未来完成保证。此修订不改变 schema v4，不增加凭据、网络端口或系统安全配置。
 
 动作确认必须显式提供原动作的 day，并按 keeper/account/task/day/pending 原子匹配，返回是否成功；确认不改写 day 或 started_at。错日、缺失或已确认记录不能被新观察覆盖。此修复不迁移 schema、不改既有记录，旧 pending 继续跨日阻止写操作。
+
+schema v5 仅添加动作审计表和触发器，支持从 v1/v2/v3/v4 升级；迁移逐字段复制现有 action_attempts 到 action_history，不更改原行。以后每次保留预算或确认都追加完整快照，历史与 action_archives 禁止 UPDATE/DELETE，当前意图也禁止 DELETE。新日预留可替换当前槽位，原始 pending、日期和开始时间仍永久保存在历史中。
+
+显式归档只接受精确的 keeper/account/task/day/started_at 身份和已过期业务日。unknown 不释放预算；abandoned 必须通过 Keeper 对同一已落库 run 的离线证据审查。归档追加 source revision、证据SHA256、原run完整快照、原暂停快照，不改变原动作行、不写成功、不删除暂停。get_action 对已审查 abandoned 返回终止投影，原始数据库行仍为 pending；只允许晚于旧日且不早于归档业务日的新预算。归档后的原意图不能再 confirm；稳定 UUID 重试幂等，变更证据/身份使用同 UUID 会拒绝。
+
+时间校验回调在预留/确认事务取得写锁后和更新后各执行一次；日期变化会回滚动作与快照，避免等锁或写入期间换日后错误确认。回调是纯本地时间检查，不做网络。CLI archive-action 使用 existing_only，不偷偷升级旧库，不构建 Runtime 或浏览器。先完成受控迁移，再使用新客户端；旧版本不能直接操作 v5。该变更不把结果未知的写入变成可重试。

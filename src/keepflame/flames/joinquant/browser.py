@@ -16,17 +16,18 @@ from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL,
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
 from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
 from keepflame.flames.joinquant.task import TaskConfigurationError, task_from_settings
+from keepflame.flames.joinquant.day import BusinessDayFence
 
 
 class JoinQuantPage:
-    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None, task=None):
+    def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None, task=None, date_fence=None):
         self.page = page
         self.deadline = deadline
         if origin != JOINQUANT_ORIGIN:
             raise FlowError("unexpected_origin")
         self.origin = origin
         self.task = task or task_from_settings({})
-        self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch, task=self.task.name)
+        self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch, task=self.task.name, date_fence=date_fence)
 
     def close(self):
         # Popups share this account context and must be gone before unroute.
@@ -253,17 +254,27 @@ class JoinQuantBrowserKeeper:
                        next_action_at=max(stopped.next_action_at, observation.next_action_at or context.now)
                        if observation else stopped.next_action_at)
 
-    def _run(self, context, gateway, task, progress):
-        day = context.now.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    def _run(self, context, gateway, task, progress, fence=None):
+        fence = fence or BusinessDayFence(context)
+        day = fence.day
+        def invoke(operation, *args):
+            fence.check()
+            value = operation(*args)
+            fence.check()
+            return value
+        def inspect():
+            return self._observation(context, invoke(gateway.inspect, fence.check()), task)
         action = context.storage.get_action("joinquant", context.account_id, task.name)
         if task.name == "checkin":
-            gateway.open()
-        before = self._observation(context, gateway.inspect(context.now), task)
+            invoke(gateway.open)
+        before = inspect()
 
         def complete(observation, automatic):
+            fence.check()
             if (action is not None and action.state == "pending") or progress["reserved"]:
-                if not context.storage.confirm_action("joinquant", context.account_id, task.name, context.now, day=day):
+                if not context.storage.confirm_action("joinquant", context.account_id, task.name, fence.check(), day=day, validate_time=fence.check):
                     return self._unconfirmed(context, observation, cause="action_confirmation_rejected")
+            fence.check()
             return replace(observation, metadata={**observation.metadata, "automatic_action": automatic})
 
         # A current-day observation cannot settle a different day's intent.
@@ -282,8 +293,9 @@ class JoinQuantBrowserKeeper:
             return before
 
         def reserve(stage):
+            fence.check()
             if not progress["reserved"]:
-                if not context.storage.reserve_action("joinquant", context.account_id, task.name, day, context.now):
+                if not context.storage.reserve_action("joinquant", context.account_id, task.name, day, context.now, validate_time=fence.check):
                     return False
                 progress["reserved"] = True
             progress["action_stage"] = stage
@@ -293,34 +305,34 @@ class JoinQuantBrowserKeeper:
             # Article JavaScript can itself create eligibility. Journal before it runs.
             if not reserve("reading"):
                 return self._unconfirmed(context, before, cause="action_reservation_rejected")
-            gateway.read_article()
-            before = self._observation(context, gateway.inspect(context.now), task)
+            invoke(gateway.read_article)
+            before = inspect()
             if before.status is KeepStatus.SUCCESS:
                 return complete(before, True)
             if before.metadata.get("reading_state") != "claimable":
                 return self._unconfirmed(context, before, cause="reading_qualification_unconfirmed")
         if task.name == "reading":
-            gateway.open()
+            invoke(gateway.open)
         if not reserve("claim"):
             return self._unconfirmed(context, before, cause="action_reservation_rejected")
         payload = piece = None
         try:
             try:
-                payload, piece = gateway.challenge()
+                payload, piece = invoke(gateway.challenge)
             except FlowError as exc:
                 if exc.status is not None or exc.reason not in {"signin_button_changed", "challenge_not_received"}:
                     raise
-                after = self._observation(context, gateway.inspect(context.now), task)
+                after = inspect()
                 if after.status is KeepStatus.SUCCESS:
                     return complete(after, True)
                 raise
-            match = self.solver(payload, piece)
+            match = invoke(self.solver, payload, piece)
         finally:
             # Image URIs and challenge bytes are local to this attempt, never files.
             payload = piece = None
-        gateway.submit(match.x)
+        invoke(gateway.submit, match.x)
         for attempt in range(3):
-            after = self._observation(context, gateway.inspect(context.now), task)
+            after = inspect()
             if after.status is KeepStatus.SUCCESS:
                 result = complete(after, True)
                 return replace(result, metadata={**result.metadata, "match_confidence": match.confidence})
@@ -340,18 +352,20 @@ class JoinQuantBrowserKeeper:
         if not isinstance(profile, str) or not profile or type(headless) is not bool:
             return self._stop(context, "browser_configuration", human=True)
         deadline = time.monotonic() + 60 + (task.wait_seconds if task.name == "reading" else 0)
+        fence = BusinessDayFence(context)
         gateway = None
         progress = {"reserved": False, "action_stage": "inspect"}
         try:
             browser = context.capabilities.require("browser")
             with browser.open(profile_dir=profile, account_id=context.account_id,
                               origin=JOINQUANT_ORIGIN, headless=headless) as page:
-                options = {"deadline": deadline}
+                fence.check()
+                options = {"deadline": deadline, "date_fence": fence}
                 if task.name == "reading":
                     options["task"] = task
                 gateway = self.page_factory(page, **options)
                 try:
-                    result = self._run(context, gateway, task, progress)
+                    result = self._run(context, gateway, task, progress, fence)
                 finally:
                     # Close the task page before removing its gate, keeping the account
                     # browser context alive. Fakes may omit close; production never does.
@@ -383,6 +397,7 @@ class JoinQuantBrowserKeeper:
             failure = getattr(gateway.guard, "failure", None)
             if failure is not None and failure.blocked_request is not None:
                 metadata["blocked_request"] = failure.blocked_request
+            metadata["write_guard_schema"] = 1
             metadata["stage_counts"] = {
                 "status": counts["status"], "page_status": counts["page_status"],
                 "reading_registration": counts["/community/post/postView"],
