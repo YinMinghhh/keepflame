@@ -16,6 +16,7 @@ from keepflame.core.protocols import AutomationPaused
 from keepflame.runtime import Runtime, build_runtime
 from keepflame.storage.sqlite import StorageError
 from keepflame.storage import SQLiteStorage
+from keepflame.storage.dispatch import DispatchError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,6 +35,10 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--execute", action="store_true", help="explicitly allow the requested operation; default is dry-run")
         if name in ("run-once", "login", "resume"):
             command.add_argument("--flame", help="named Flame")
+        if name == 'run-once':
+            command.add_argument('--via-daemon', action='store_true',
+                                 help='queue one bounded run in the existing daemon context; never start a browser')
+            command.add_argument('--request-id', help='stable UUID for idempotent daemon submission')
         if name == "resume":
             command.add_argument("--account", action="store_true", help="also resume this Keeper account after manually resolving authentication")
         if name == "login":
@@ -152,7 +157,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
     if as_json:
         print(
             json.dumps(
-                {"service_ok": True, "remote_checked": False, "flames": items, "login_requests": runtime.storage.login_requests(include_finished=True), "runtime_commands": runtime.storage.runtime_commands(include_finished=True)},
+                {"service_ok": True, "remote_checked": False, "flames": items, "login_requests": runtime.storage.login_requests(include_finished=True), "runtime_commands": runtime.storage.runtime_commands(include_finished=True), "daemon_dispatch": runtime.storage.dispatch_status()},
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -290,8 +295,27 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     runtime = None
     try:
+        if args.command == 'run-once':
+            if args.via_daemon and (not args.flame or not args.request_id):
+                raise ConfigError('--via-daemon requires --flame and a stable --request-id UUID')
+            if args.request_id and not args.via_daemon:
+                raise ConfigError('--request-id requires --via-daemon')
         if args.command in ("run", "run-once", "login", "resume", "reload") and not args.execute:
             return _dry_run(args)
+        if args.command == 'run-once' and args.via_daemon:
+            config = load_config(args.config)
+            flame = next((f for f in config.enabled_flames() if f.id == args.flame), None)
+            if flame is None:
+                raise ConfigError('--flame must name an enabled Flame')
+            # Existing schema only: no migration, new runtime, profile access,
+            # fallback to a standalone run, or ownership of the daemon browser.
+            storage = SQLiteStorage(config.storage.path, existing_only=True)
+            request = storage.submit_run(args.request_id, config, flame, datetime.now(timezone.utc))
+            print(json.dumps({'event': 'daemon_run_request', 'request_id': request['id'],
+                              'state': request['state'], 'expires_at': request['expires_at'],
+                              'run_id': request['run_id'], 'result_status': request['result_status'],
+                              'reason': request['reason'], 'execution_completed': request['state'] == 'completed'}))
+            return 0
         if args.command == "reload":
             config = load_config(args.config)
             # Do not initialize a candidate database or browser just to queue a reload.
@@ -301,10 +325,11 @@ def main(argv: list[str] | None = None) -> int:
                               "message": "Check runtime_commands for completion; the database path must remain unchanged."}))
             return 0
         runtime = build_runtime(args.config)
-        if args.command in ("run", "run-once"):
+        if args.command == 'run':
+            with runtime.daemon_session():
+                return _run_daemon(runtime)
+        if args.command == 'run-once':
             with runtime.storage.execution_lock():
-                if args.command == "run":
-                    return _run_daemon(runtime)
                 return _run_once(runtime, args.flame)
         if args.command in ("login", "resume", "reload"):
             return _control(runtime, args)
@@ -313,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "health":
             return _health(runtime)
         raise AssertionError(f"unhandled command: {args.command}")
-    except (ConfigError, PluginError, StorageError, AutomationPaused) as exc:
+    except (ConfigError, PluginError, StorageError, AutomationPaused, DispatchError) as exc:
         return _error(str(exc), type(exc).__name__)
     except Exception as exc:
         return _error("command failed safely", type(exc).__name__)

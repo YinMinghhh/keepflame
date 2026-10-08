@@ -22,8 +22,9 @@ from keepflame.core.models import (
 )
 
 from keepflame.storage.control import ControlStorageMixin
+from keepflame.storage.dispatch import DispatchStorageMixin
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StorageError(RuntimeError):
@@ -88,7 +89,7 @@ def _notification(value: str) -> PendingNotification:
     return PendingNotification(result=KeepResult(**result), **raw)
 
 
-class SQLiteStorage(ControlStorageMixin):
+class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin):
     def __init__(self, path: str | Path, *, existing_only: bool = False) -> None:
         self.path = Path(path)
         self.existing_only = existing_only
@@ -125,7 +126,7 @@ class SQLiteStorage(ControlStorageMixin):
                     connection.execute(
                         "INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,)
                     )
-                elif version_row["version"] not in (1, 2, SCHEMA_VERSION):
+                elif version_row["version"] not in (1, 2, 3, SCHEMA_VERSION):
                     raise StorageError(
                         f"unsupported database schema version: {version_row['version']}"
                     )
@@ -180,6 +181,7 @@ class SQLiteStorage(ControlStorageMixin):
                     )"""
                 )
                 self._initialize_control(connection)
+                self._initialize_dispatch(connection)
                 connection.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))
         except sqlite3.Error as exc:
             raise StorageError(f"failed to initialize SQLite database: {self.path}") from exc

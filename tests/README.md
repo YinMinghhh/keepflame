@@ -19,3 +19,9 @@
 `test_review_runtime.py` / `test_review_reading.py` 保留独立复核发现的反例：登录窗口崩溃重开、请求/暂停竞态、popup和关闭失败时的门禁、document重定向及未知响应值进入SQLite。修复后这些安全性质必须持续成立。
 
 `test_joinquant_request_diagnostics.py` 检查原文章 runList POST 只能被本地阻断一次，范围变化仍停止；首个致命请求的固定标签不泄漏未知 URL/参数/header/body，且经过 Keeper、CLI 和 JSONL 后仍保留。阅读 Chrome fixture 包含初始化 XHR 失败与未知写反例，确认前者不会阻止原页自然阅读，后者保留 pending 并停止。运行时回归另确认任务全部停用、idle 或借用者关闭 runtime 时上下文仍属于原 pool，由 owner 明确关闭。
+
+`test_daemon_dispatch.py` 验证 CLI 到现有 daemon 的单次任务队列，包括独立客户端 Python 进程退出、并发 UUID 去重、容量/期限、配置/账号绑定、原有暂停/排期/退避、调度冲突、异常与信号退出、重启不重放，以及 v3→v4 保留历史和 pending。信号测试调用合成 handler，崩溃测试构造新库中的在途状态；不终止真实进程、不读取真实状态库。
+
+`test_daemon_dispatch_browser.py` 另有两个 opt-in Chrome 场景：合成正式登录后，CLI 签到/阅读任务沿原上下文及未改动的聚宽门禁运行；阅读中的未知 POST 被拒绝并保留 pending。另一个主动关闭自己的合成 context，验证后续任务停止且不自动重建。只用空临时 profile、合成 HttpOnly Cookie、内存传输；不包含真实认证、跨日有效期、跨进程会话恢复或领取成功验收。应通过受限验证脚本禁用 DNS 并设置关闭的回环代理；不得为了用例通过放宽生产路由。
+
+`test_daemon_owner_liveness.py` 覆盖独立复核的P2：合成daemon子进程os._exit后，普通run-once子进程持通用锁，第三个CLI客户端必须拒绝入队。`daemon_owner_process.py` 只允许新建测试目录内写入，拒绝浏览器、网络、真实账户文件，并为握手设置超时。另检查专属锁的世代绑定、非法owner拒绝、0600/空文件、崩溃残留不代表活性，以及浏览器关闭前两把锁均保留。正常交接、UUID幂等和重启不重放继续由既有定点测试覆盖。

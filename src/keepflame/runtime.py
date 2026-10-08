@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TextIO
+from uuid import uuid4
 
 from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, UrllibHttpClient
 from keepflame.capabilities.browser import IsolatedBrowser, OwnedBrowserSession
@@ -17,6 +19,8 @@ from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
 from keepflame.core.protocols import Notifier
 from keepflame.core.service import SchedulerService
+from keepflame.core.schedule import due_at
+from keepflame.core.protocols import AutomationPaused
 from keepflame.notifier import JsonlNotifier
 from keepflame.storage import SQLiteStorage
 
@@ -31,8 +35,32 @@ class Runtime:
     owned_browser: BrowserPool | None = None
     login: LoginCoordinator | None = None
     configuration_blocked: bool = False
+    dispatch_owner: str | None = None
+    _closed: bool = False
+
+    @contextmanager
+    def daemon_session(self):
+        """One owner holds the runner lock until its browser has closed.
+
+        Only an explicitly executing daemon opens a request generation. Ordinary
+        CLI clients neither own nor acquire its browser and cannot revive it.
+        """
+        if self._closed or self.dispatch_owner is not None:
+            raise ConfigError('runtime cannot start another daemon session')
+        with self.storage.execution_lock():
+            owner = str(uuid4())
+            with self.storage.daemon_owner_lock(owner):
+                self.dispatch_owner = owner
+                try:
+                    self.storage.start_dispatch(owner, self.config, self.orchestrator.clock.now())
+                    self.notifier.emit('daemon_owner_started', owner_id=owner)
+                    yield
+                finally:
+                    self.close()
 
     def poll_controls(self):
+        if self._closed or self.service.stop_event.is_set():
+            return
         # Edits cannot silently leave old enabled tasks running. Only a valid,
         # explicit reload can clear this latch, including after the file is fixed.
         try:
@@ -56,6 +84,8 @@ class Runtime:
                     self.orchestrator.registry.resolve(name)
                 self.config = self.service.config = updated
                 self.login.config = updated
+                if self.dispatch_owner is not None:
+                    self.storage.refresh_dispatch(self.dispatch_owner, updated)
                 self.configuration_blocked = False
                 self.storage.finish_command(request['id'])
                 self.notifier.emit('configuration_reloaded', request_id=request['id'])
@@ -65,13 +95,66 @@ class Runtime:
                 self.storage.finish_command(request['id'], type(exc).__name__)
                 self.notifier.emit('configuration_reload_failed', error_type=type(exc).__name__)
         self.login.tick()
+        self.dispatch_one()
+
+    def dispatch_one(self):
+        if self.dispatch_owner is None or self._closed or self.service.stop_event.is_set():
+            return
+        now = self.orchestrator.clock.now()
+        request = self.storage.claim_run(self.dispatch_owner, now)
+        if request is None:
+            return
+        flame = next((f for f in self.config.enabled_flames()
+                      if (f.id, f.keeper, f.account_id) ==
+                      (request['flame_id'], request['keeper'], request['account_id'])), None)
+        reason = None
+        if self.configuration_blocked or request['fingerprint'] != self.config.source_fingerprint:
+            reason = 'configuration_changed'
+        elif flame is None:
+            reason = 'flame_disabled_or_changed'
+        elif self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
+            reason = 'automation_paused'
+        elif due_at(flame.schedule, self.storage.get_state(flame.id, flame.account_id), now) > now:
+            reason = 'not_due'
+        outcome = None
+        if reason is None:
+            self.notifier.emit('daemon_run_started', request_id=request['id'], owner_id=self.dispatch_owner,
+                               flame_id=flame.id)
+            try:
+                outcome = self.orchestrator.run_flame(flame, notify=False)
+            except AutomationPaused:
+                # A pause may have arrived after the previous local check.
+                reason = 'automation_paused'
+            # Unexpected storage/control errors escape and stop the owner. Its
+            # running request becomes interrupted; it is never auto-replayed.
+        self.storage.finish_run_request(request['id'], self.dispatch_owner,
+                                        self.orchestrator.clock.now(), reason=reason, outcome=outcome)
+        self.notifier.emit('daemon_run_finished', request_id=request['id'],
+                           state='rejected' if reason else 'completed', reason=reason,
+                           run_id=None if outcome is None else outcome.record.run_id,
+                           result_status=None if outcome is None else outcome.record.result.status.value)
 
     def blocked(self, flame):
-        return self.configuration_blocked or self.login.blocked(flame)
+        return (self.configuration_blocked or self.login.blocked(flame)
+                or self.dispatch_owner is not None
+                and self.storage.has_requested_run(self.dispatch_owner, flame))
 
     def close(self):
-        if self.owned_browser is not None:
-            self.owned_browser.close()
+        if self._closed:
+            return
+        self._closed = True
+        self.service.stop_event.set()
+        owner = self.dispatch_owner
+        self.dispatch_owner = None
+        try:
+            if owner is not None:
+                self.storage.stop_dispatch(owner, self.orchestrator.clock.now())
+        finally:
+            if self.owned_browser is not None:
+                self.owned_browser.close()
+        if owner is not None:
+            self.notifier.emit('daemon_owner_stopped', owner_id=owner,
+                               unconfirmed_actions_preserved=True)
 
 
 def build_runtime(
