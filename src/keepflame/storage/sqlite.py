@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from keepflame.core.models import (
+    BusinessTarget,
+    CompletionReceipt,
     FlameState,
     HumanAction,
     KeepStatus,
@@ -25,7 +27,7 @@ from keepflame.storage.control import ControlStorageMixin
 from keepflame.storage.archive import ArchiveStorageMixin
 from keepflame.storage.dispatch import DispatchStorageMixin
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class StorageError(RuntimeError):
@@ -72,6 +74,7 @@ def _notification_json(value: PendingNotification) -> str:
     for name in ("occurred_at", "retry_at", "reminder_at"):
         raw[name] = _timestamp(getattr(value, name))
     raw["result"]["next_action_at"] = _timestamp(value.result.next_action_at)
+    raw["result"]["receipt"] = None if value.result.receipt is None else value.result.receipt.to_dict()
     return _json(raw)
 
 
@@ -79,6 +82,8 @@ def _notification(value: str) -> PendingNotification:
     raw = json.loads(value)
     result = raw.pop("result")
     result["status"] = KeepStatus(result["status"])
+    result["receipt"] = None if result.get("receipt") is None else CompletionReceipt.from_dict(result["receipt"])
+    raw["business_target"] = None if raw.get("business_target") is None else BusinessTarget(**raw["business_target"])
     result["next_action_at"] = _datetime(result["next_action_at"])
     if result["human_action"] is not None:
         result["human_action"] = HumanAction(**result["human_action"])
@@ -127,7 +132,7 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                     connection.execute(
                         "INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,)
                     )
-                elif version_row["version"] not in (1, 2, 3, 4, SCHEMA_VERSION):
+                elif version_row["version"] not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
                     raise StorageError(
                         f"unsupported database schema version: {version_row['version']}"
                     )
@@ -184,6 +189,17 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                 self._initialize_control(connection)
                 self._initialize_archive(connection)
                 self._initialize_dispatch(connection)
+                # Add nullable evidence fields only. Never infer or rewrite a
+                # historical success date from its cleanup wall-clock timestamp.
+                for table, fields in {
+                    "keep_runs": {"business_target_json": "TEXT", "completion_receipt_json": "TEXT",
+                                  "clock_regressed": "INTEGER NOT NULL DEFAULT 0"},
+                    "flame_state": {"last_checked_target_json": "TEXT", "last_success_receipt_json": "TEXT"},
+                }.items():
+                    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                    for name, declaration in fields.items():
+                        if name not in existing:
+                            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
                 connection.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))
         except sqlite3.Error as exc:
             raise StorageError(f"failed to initialize SQLite database: {self.path}") from exc
@@ -203,6 +219,10 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
             next_action_at=_datetime(row["next_action_at"]),
             last_reminder_at=_datetime(row["last_reminder_at"]),
             metadata=json.loads(row["metadata_json"]),
+            last_checked_target=(None if row["last_checked_target_json"] is None else
+                                 BusinessTarget(**json.loads(row["last_checked_target_json"]))),
+            last_success_receipt=(None if row["last_success_receipt_json"] is None else
+                                  CompletionReceipt.from_dict(json.loads(row["last_success_receipt_json"]))),
         )
 
     def get_state(self, flame_id: str, account_id: str) -> FlameState | None:
@@ -246,8 +266,9 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                     INSERT INTO keep_runs(
                         run_id, flame_id, account_id, started_at, finished_at,
                         status, message, reward_json, metadata_json,
-                        next_action_at, human_action_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        next_action_at, human_action_json, business_target_json,
+                        completion_receipt_json, clock_regressed
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -261,6 +282,9 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                         _json(run.result.metadata),
                         _timestamp(run.result.next_action_at),
                         _action_json(run.result.human_action),
+                        None if run.business_target is None else _json(run.business_target.to_dict()),
+                        None if run.result.receipt is None else _json(run.result.receipt.to_dict()),
+                        int(run.clock_regressed),
                     ),
                 )
                 connection.execute(
@@ -269,8 +293,8 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                         flame_id, account_id, status, message, last_checked_at,
                         last_success_at, consecutive_failures, pending_human_since,
                         human_action_json, next_action_at, last_reminder_at,
-                        metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        metadata_json, last_checked_target_json, last_success_receipt_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(flame_id, account_id) DO UPDATE SET
                         status = excluded.status,
                         message = excluded.message,
@@ -281,7 +305,9 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                         human_action_json = excluded.human_action_json,
                         next_action_at = excluded.next_action_at,
                         last_reminder_at = excluded.last_reminder_at,
-                        metadata_json = excluded.metadata_json
+                        metadata_json = excluded.metadata_json,
+                        last_checked_target_json = excluded.last_checked_target_json,
+                        last_success_receipt_json = excluded.last_success_receipt_json
                     """,
                     (
                         state.flame_id,
@@ -296,6 +322,8 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                         _timestamp(state.next_action_at),
                         _timestamp(state.last_reminder_at),
                         _json(state.metadata),
+                        None if state.last_checked_target is None else _json(state.last_checked_target.to_dict()),
+                        None if state.last_success_receipt is None else _json(state.last_success_receipt.to_dict()),
                     ),
                 )
                 connection.execute(

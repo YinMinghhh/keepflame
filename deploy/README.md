@@ -115,7 +115,7 @@ python3.13 -I -B deploy/prepare.py plan \
 
 ### 过期意图的审计归档（默认仅预览）
 
-这不是领取命令。先停止不兼容旧版本、备份规范化状态，在停用配置下完成 schema v5 受控升级；archive-action 自身仅接受已存在的 v5 库，不会启动Runtime、浏览器或做网络访问。使用 `actions --config ... --flame ...` 读取该任务的原始快照和归档历史。
+这不是领取命令。先停止不兼容旧版本、备份规范化状态，在停用配置下完成 schema v6 受控升级；archive-action 自身仅接受已存在的 v6 库，不会启动Runtime、浏览器或做网络访问。使用 `actions --config ... --flame ...` 读取该任务的原始快照和归档历史。
 
 审阅证据 JSON 仅允许 `version:1`、完整40位 `source_revision` 和1至8个64位SHA256 `references`；保留这些原证据文件，禁止放入Cookie、token或页面内容。归档必须提供精确旧日与 started_at、稳定UUID；abandoned 另需同一原始运行的 run-id，并由 Keeper核验实际已落库零写计数。未知/已发送写入、来源未验证的记录只能 unknown，不释放预算。
 

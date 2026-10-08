@@ -37,14 +37,14 @@ class SchedulerService:
         current = (now or self.clock.now()).astimezone(timezone.utc)
         outcomes: list[RunOutcome] = []
         for flame in self.config.enabled_flames():
-            current = (now or self.clock.now()).astimezone(timezone.utc)
+            current = (self.clock.now() if outcomes or now is None else now).astimezone(timezone.utc)
             if self.stop_event.is_set() or self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
                 continue
             state = self.storage.get_state(flame.id, flame.account_id)
             if due_at(flame.schedule, state, current) <= current:
                 outcomes.append(self.orchestrator.run_flame(flame, now=current))
 
-        current = (now or self.clock.now()).astimezone(timezone.utc)
+        current = self.clock.now().astimezone(timezone.utc)
         next_due: datetime | None = None
         for flame in self.config.enabled_flames():
             notification_due = self.orchestrator.deliver_pending(flame, now=current)

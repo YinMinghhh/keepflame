@@ -5,6 +5,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from keepflame.flames.joinquant.guard import FlowError
+from keepflame.core.models import BusinessTarget
 
 ZONE = ZoneInfo('Asia/Shanghai')
 
@@ -12,7 +13,10 @@ ZONE = ZoneInfo('Asia/Shanghai')
 class BusinessDayFence:
     def __init__(self, context):
         self.started = context.now
-        self.day = context.now.astimezone(ZONE).date().isoformat()
+        self.target = getattr(context, 'business_target', None) or BusinessTarget.at(context.now, ZONE.key)
+        if self.target.timezone != ZONE.key or not self.target.contains(context.now):
+            raise FlowError('business_target_mismatch')
+        self.day = self.target.day
         self.clock = getattr(context, 'clock', None)
         self.monotonic_start = time.monotonic()
         self.changed = False

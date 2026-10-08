@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping, Protocol, TypeVar
+from typing import Callable, Mapping, Protocol, TypeVar
 
 from keepflame.core.models import (
     ActionAttempt,
+    BusinessTarget,
+    CompletionReceipt,
     FlameState,
     JsonValue,
     KeepResult,
@@ -88,6 +90,8 @@ class KeeperContext:
     storage: Storage
     now: datetime
     clock: Clock | None = None
+    business_target: BusinessTarget | None = None
+    completion_receipt: Callable[[], CompletionReceipt] | None = None
 
 
 class Keeper(Protocol):

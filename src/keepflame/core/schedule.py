@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from keepflame.core.config import ScheduleConfig
-from keepflame.core.models import FlameState, KeepStatus
+from keepflame.core.models import BusinessTarget, FlameState, KeepStatus
 
 
 def _at(day: date, schedule_time, zone: ZoneInfo) -> datetime:
@@ -42,12 +42,17 @@ def next_after_result(
     *,
     requested_at: datetime | None = None,
     consecutive_failures: int = 0,
+    completed_target: BusinessTarget | None = None,
 ) -> datetime:
     now = _as_utc(now)
     zone = ZoneInfo(schedule.timezone)
     day = now.astimezone(zone).date()
     if status is KeepStatus.SUCCESS:
-        candidate = _at(day + timedelta(days=1), schedule.first_check, zone)
+        if completed_target is not None:
+            if completed_target.timezone != schedule.timezone:
+                raise ValueError("completion timezone differs from schedule")
+            day = date.fromisoformat(completed_target.day)
+        candidate = max(now, _at(day + timedelta(days=1), schedule.first_check, zone))
     else:
         minutes = schedule.recheck_minutes
         if status is KeepStatus.FAILED:
@@ -72,7 +77,13 @@ def due_at(
     if state is not None:
         if state.next_action_at is not None:
             candidate = max(candidate, _as_utc(state.next_action_at))
-        if (
+        if state.last_success_receipt is not None:
+            target = state.last_success_receipt.target
+            if target.timezone != schedule.timezone:
+                raise ValueError("persisted completion timezone differs from schedule")
+            completed = date.fromisoformat(target.day)
+            candidate = max(candidate, _at(completed + timedelta(days=1), schedule.first_check, zone))
+        elif (
             state.status is KeepStatus.SUCCESS
             and state.last_success_at is not None
             and state.last_success_at.astimezone(zone).date() == today

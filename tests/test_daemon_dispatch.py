@@ -302,7 +302,7 @@ def test_dispatch_respects_existing_gates(tmp_path, monkeypatch, case):
         runtime.poll_controls()
         observed = request(runtime, row['id'])
         assert observed['state'] == 'rejected'
-        assert observed['reason'] in {'automation_paused','configuration_changed','flame_disabled_or_changed','not_due'}
+        assert observed['reason'] in {'automation_paused','configuration_changed','flame_disabled_or_changed','not_due','business_day_changed'}
         assert not visits and not browser.launches
 
 

@@ -75,6 +75,10 @@ def _outcome_dict(outcome: RunOutcome) -> dict[str, object]:
         "event": "run_once_result",
         "timestamp": outcome.record.finished_at.astimezone(timezone.utc).isoformat(),
         "run_id": outcome.record.run_id,
+        "started_at": outcome.record.started_at.astimezone(timezone.utc).isoformat(),
+        "business_target": None if outcome.record.business_target is None else outcome.record.business_target.to_dict(),
+        "completion_receipt": None if result.receipt is None else result.receipt.to_dict(),
+        "clock_regressed": outcome.record.clock_regressed,
         "flame_id": outcome.record.flame_id,
         "account_id": outcome.record.account_id,
         "status": result.status.value,
@@ -131,6 +135,8 @@ def _state_dict(flame: FlameConfig, state: FlameState | None) -> dict[str, objec
             if state.last_success_at is None
             else state.last_success_at.astimezone(timezone.utc).isoformat()
         ),
+        "last_checked_target": None if state.last_checked_target is None else state.last_checked_target.to_dict(),
+        "last_success_receipt": None if state.last_success_receipt is None else state.last_success_receipt.to_dict(),
         "consecutive_failures": state.consecutive_failures,
         "pending_human_since": (
             None

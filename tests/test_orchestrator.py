@@ -11,6 +11,7 @@ from keepflame.flames.joinquant import JoinQuantKeeper
 from keepflame.notifier import JsonlNotifier
 from keepflame.storage import SQLiteStorage
 from tests.helpers import (
+    FixedClock,
     FakeHttpClient,
     FakeNotifier,
     MemoryStorage,
@@ -63,6 +64,7 @@ def orchestrator_for(results, storage=None, notifier=None) -> Orchestrator:
         capabilities=CapabilityRegistry({}),
         secrets=StaticSecrets("unused=value"),
         notifier=notifier or FakeNotifier(),
+        clock=FixedClock(local(11, 9)),
     )
 
 
@@ -80,9 +82,13 @@ def test_waiting_reminder_and_recovery_are_low_noise() -> None:
         notifier,
     )
 
+    runner.clock.current = local(11, 9)
     first = runner.run_flame(flame(), now=local(11, 9))
+    runner.clock.current = local(11, 10)
     repeated = runner.run_flame(flame(), now=local(11, 10))
+    runner.clock.current = local(11, 20)
     reminder = runner.run_flame(flame(), now=local(11, 20))
+    runner.clock.current = local(11, 21)
     recovered = runner.run_flame(flame(), now=local(11, 21))
 
     assert first.notification_event == "human_action_required"
@@ -102,7 +108,9 @@ def test_waiting_reminder_and_recovery_are_low_noise() -> None:
 def test_waiting_notifies_again_on_next_schedule_day() -> None:
     storage = MemoryStorage()
     runner = orchestrator_for([wait_result(), wait_result()], storage)
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame(), now=local(11, 9), notify=False)
+    runner.clock.current = local(12, 9)
     next_day = runner.run_flame(flame(), now=local(12, 9), notify=False)
     assert next_day.notification_event == "human_action_required"
 
@@ -117,8 +125,11 @@ def test_failures_increment_and_identical_failure_is_silent() -> None:
         ],
         storage,
     )
+    runner.clock.current = local(11, 9)
     first = runner.run_flame(flame(), now=local(11, 9), notify=False)
+    runner.clock.current = local(11, 10)
     second = runner.run_flame(flame(), now=local(11, 10), notify=False)
+    runner.clock.current = local(11, 11)
     recovered = runner.run_flame(flame(), now=local(11, 11), notify=False)
     assert first.state.consecutive_failures == 1
     assert second.state.consecutive_failures == 2
@@ -136,7 +147,9 @@ def test_account_state_is_isolated() -> None:
         ],
         storage,
     )
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame("a", "joinquant-a"), now=local(11, 9), notify=False)
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame("b", "joinquant-b"), now=local(11, 9), notify=False)
     assert storage.get_state("joinquant-a", "a").message == "one"
     assert storage.get_state("joinquant-b", "b").message == "two"
@@ -155,6 +168,7 @@ def test_cookie_never_reaches_sqlite_or_jsonl(tmp_path: Path) -> None:
         capabilities=CapabilityRegistry({"http": http}),
         secrets=StaticSecrets(cookie),
         notifier=JsonlNotifier(stream),
+        clock=FixedClock(local(11, 9)),
     )
     config = flame()
     config = FlameConfig(
@@ -165,6 +179,7 @@ def test_cookie_never_reaches_sqlite_or_jsonl(tmp_path: Path) -> None:
         schedule=config.schedule,
         settings={"cookie_file": "/run/secrets/joinquant.cookie"},
     )
+    runner.clock.current = local(11, 9)
     runner.run_flame(config, now=local(11, 9))
     assert cookie not in stream.getvalue()
     assert cookie.encode() not in (tmp_path / "keepflame.sqlite3").read_bytes()

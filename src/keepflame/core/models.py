@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from enum import StrEnum
 from typing import TypeAlias
 
@@ -111,6 +112,53 @@ def _require_aware(value: datetime | None, field_name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class BusinessTarget:
+    """Immutable daily scope selected before any Keeper operation."""
+    day: str
+    timezone: str
+
+    def __post_init__(self) -> None:
+        if date.fromisoformat(self.day).isoformat() != self.day:
+            raise ValueError("business day must be canonical ISO format")
+        ZoneInfo(self.timezone)
+
+    @classmethod
+    def at(cls, instant: datetime, zone: str) -> BusinessTarget:
+        _require_aware(instant, "business instant")
+        return cls(instant.astimezone(ZoneInfo(zone)).date().isoformat(), zone)
+
+    def contains(self, instant: datetime) -> bool:
+        return self == self.at(instant, self.timezone)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"day": self.day, "timezone": self.timezone}
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionReceipt:
+    """A successful observation, captured before resource cleanup begins."""
+    target: BusinessTarget
+    observed_at: datetime
+    source: str = "keeper_observation"
+
+    def __post_init__(self) -> None:
+        _require_aware(self.observed_at, "observed_at")
+        if not self.target.contains(self.observed_at):
+            raise ValueError("completion observation does not belong to its target")
+        if self.source not in {"keeper_observation", "core_return"}:
+            raise ValueError("invalid completion source")
+
+    def to_dict(self) -> dict:
+        return {"target": self.target.to_dict(),
+                "observed_at": self.observed_at.astimezone(timezone.utc).isoformat(),
+                "source": self.source}
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> CompletionReceipt:
+        return cls(BusinessTarget(**raw["target"]), datetime.fromisoformat(raw["observed_at"]), raw["source"])
+
+
+@dataclass(frozen=True, slots=True)
 class KeepResult:
     status: KeepStatus
     message: str
@@ -118,6 +166,7 @@ class KeepResult:
     metadata: dict[str, JsonValue] = field(default_factory=dict)
     next_action_at: datetime | None = None
     human_action: HumanAction | None = None
+    receipt: CompletionReceipt | None = None
 
     def __post_init__(self) -> None:
         if not self.message.strip():
@@ -126,6 +175,8 @@ class KeepResult:
             raise ValueError("WAITING_HUMAN requires a human action")
         if self.status is not KeepStatus.WAITING_HUMAN and self.human_action is not None:
             raise ValueError("only WAITING_HUMAN may carry a human action")
+        if self.receipt is not None and self.status is not KeepStatus.SUCCESS:
+            raise ValueError("only SUCCESS may carry a completion receipt")
         _require_aware(self.next_action_at, "next_action_at")
         metadata_copy = dict(self.metadata)
         _validate_metadata(metadata_copy)
@@ -146,6 +197,8 @@ class FlameState:
     next_action_at: datetime | None
     last_reminder_at: datetime | None
     metadata: dict[str, JsonValue] = field(default_factory=dict)
+    last_checked_target: BusinessTarget | None = None
+    last_success_receipt: CompletionReceipt | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -169,11 +222,15 @@ class RunRecord:
     started_at: datetime
     finished_at: datetime
     result: KeepResult
+    business_target: BusinessTarget | None = None
+    clock_regressed: bool = False
 
     def __post_init__(self) -> None:
         _require_aware(self.started_at, "started_at")
         _require_aware(self.finished_at, "finished_at")
-        if self.finished_at < self.started_at:
+        if self.result.receipt is not None and self.result.receipt.target != self.business_target:
+            raise ValueError("run and receipt have different business targets")
+        if self.finished_at < self.started_at and not self.clock_regressed:
             raise ValueError("finished_at cannot be before started_at")
 
 
@@ -199,6 +256,7 @@ class PendingNotification:
     reminder_at: datetime | None = None
     attempts: int = 0
     last_error_type: str | None = None
+    business_target: BusinessTarget | None = None
 
     def __post_init__(self) -> None:
         for name in ("occurred_at", "retry_at", "reminder_at"):

@@ -80,8 +80,11 @@ def test_failure_backoff_is_bounded_and_success_resets_it(tmp_path):
         KeepResult(KeepStatus.FAILED, "offline"), KeepResult(KeepStatus.SUCCESS, "done"),
         KeepResult(KeepStatus.FAILED, "offline"),
     ])
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame(), now=local(11, 9))
+    runner.clock.current = local(11, 10)
     runner.run_flame(flame(), now=local(11, 10))
+    runner.clock.current = local(12, 9)
     result = runner.run_flame(flame(), now=local(12, 9))
     assert result.state.consecutive_failures == 1
     assert result.state.next_action_at == local(12, 10)
@@ -90,6 +93,7 @@ def test_failure_backoff_is_bounded_and_success_resets_it(tmp_path):
 def test_platform_cooldown_is_preserved_and_clamped_to_window(tmp_path):
     result = replace(wait_result(), next_action_at=local(13, 2))
     runner, service, storage, _, clock, _ = setup(tmp_path, [result])
+    runner.clock.current = local(11, 9)
     first = runner.run_flame(flame(), now=local(11, 9))
     assert first.state.next_action_at == local(13, 9)
     clock.current = local(12, 10)
@@ -100,6 +104,7 @@ def test_platform_cooldown_is_preserved_and_clamped_to_window(tmp_path):
 
 def test_restart_catches_up_once_after_downtime(tmp_path):
     runner, _, storage, _, _, _ = setup(tmp_path, [wait_result()])
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame(), now=local(11, 9))
     _, service, _, _, _, _ = setup(tmp_path, [wait_result()], storage=SQLiteStorage(storage.path), current=local(12, 11))
     assert len(service.run_due()[0]) == 1
@@ -230,8 +235,10 @@ def test_schema_v1_is_migrated_without_losing_history(tmp_path):
 def test_pending_failure_alert_is_retained_across_days(tmp_path):
     failure = KeepResult(KeepStatus.FAILED, "offline")
     runner, _, storage, _, _, _ = setup(tmp_path, [failure, failure])
+    runner.clock.current = local(11, 9)
     runner.run_flame(flame(), now=local(11, 9), notify=False)
     first = storage.get_notification(flame().id, flame().account_id)
+    runner.clock.current = local(12, 9)
     runner.run_flame(flame(), now=local(12, 9), notify=False)
     assert storage.get_notification(flame().id, flame().account_id).notification_id == first.notification_id
 

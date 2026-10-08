@@ -53,6 +53,8 @@ def test_scheduler_resumes_persisted_next_action_after_restart(tmp_path: Path) -
         "notifier": FakeNotifier(),
     }
 
+    clock = FixedClock(local(11, 9))
+    shared["clock"] = clock
     first_runner = Orchestrator(
         registry=StaticRegistry(
             SequenceKeeper(
@@ -78,7 +80,7 @@ def test_scheduler_resumes_persisted_next_action_after_restart(tmp_path: Path) -
         ),
         **shared,
     )
-    clock = FixedClock(local(11, 10))
+    clock.current = local(11, 10)
     service = SchedulerService(
         config=config,
         storage=storage,

@@ -116,6 +116,7 @@ from keepflame.flames.joinquant.archive import review_abandonment
 
 
 class JoinQuantKeeper:
+    business_timezone = "Asia/Shanghai"
     archive_timezone = "Asia/Shanghai"
     review_abandonment = staticmethod(review_abandonment)
     browser_origin = JOINQUANT_ORIGIN

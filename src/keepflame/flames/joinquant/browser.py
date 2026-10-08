@@ -17,6 +17,7 @@ from keepflame.flames.joinquant.matching import MatchError, solve_challenge
 from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
 from keepflame.flames.joinquant.task import TaskConfigurationError, task_from_settings
 from keepflame.flames.joinquant.day import BusinessDayFence
+from keepflame.core.models import CompletionReceipt
 
 
 class JoinQuantPage:
@@ -195,6 +196,7 @@ class JoinQuantPage:
 
 
 class JoinQuantBrowserKeeper:
+    business_timezone = "Asia/Shanghai"
     def __init__(self, *, page_factory=JoinQuantPage, solver=solve_challenge, sleeper=time.sleep):
         self.page_factory = page_factory
         self.solver = solver
@@ -202,12 +204,14 @@ class JoinQuantBrowserKeeper:
 
     @staticmethod
     def _stop(context, reason, *, human=False, status=None, retry_after=None, paused=False):
-        next_action = context.now + timedelta(hours=24 if human else 6)
+        clock = getattr(context, "clock", None)
+        observed_at = clock.now() if clock is not None else context.now
+        next_action = observed_at + timedelta(hours=24 if human else 6)
         if isinstance(retry_after, str) and len(retry_after) <= 128:
             remote_limit = JoinQuantKeeper._retry_after(HttpResponse(
                 status=429 if status in (401, 403) else status, url=JOINQUANT_ORIGIN,
                 headers={"retry-after": retry_after}, body=b"",
-            ), context.now)
+            ), observed_at)
             if remote_limit is not None:
                 next_action = max(next_action, remote_limit)
         metadata = {"execution_mode": "browser", "reason": reason, "remote_status": status}
@@ -270,12 +274,16 @@ class JoinQuantBrowserKeeper:
         before = inspect()
 
         def complete(observation, automatic):
-            fence.check()
+            observed_at = fence.check()
+            issue = getattr(context, "completion_receipt", None)
+            receipt = issue() if issue is not None else CompletionReceipt(fence.target, observed_at)
             if (action is not None and action.state == "pending") or progress["reserved"]:
                 if not context.storage.confirm_action("joinquant", context.account_id, task.name, fence.check(), day=day, validate_time=fence.check):
                     return self._unconfirmed(context, observation, cause="action_confirmation_rejected")
-            fence.check()
-            return replace(observation, metadata={**observation.metadata, "automatic_action": automatic})
+            # Confirmation validates the date inside its transaction. Once committed,
+            # later cleanup/return time must not reclassify this confirmed completion.
+            return replace(observation, receipt=receipt,
+                           metadata={**observation.metadata, "automatic_action": automatic})
 
         # A current-day observation cannot settle a different day's intent.
         if action is not None and action.state == "pending" and action.day != day:
@@ -354,6 +362,7 @@ class JoinQuantBrowserKeeper:
         deadline = time.monotonic() + 60 + (task.wait_seconds if task.name == "reading" else 0)
         fence = BusinessDayFence(context)
         gateway = None
+        completed = None
         progress = {"reserved": False, "action_stage": "inspect"}
         try:
             browser = context.capabilities.require("browser")
@@ -366,6 +375,8 @@ class JoinQuantBrowserKeeper:
                 gateway = self.page_factory(page, **options)
                 try:
                     result = self._run(context, gateway, task, progress, fence)
+                    if result.status is KeepStatus.SUCCESS and result.receipt is not None:
+                        completed = result
                 finally:
                     # Close the task page before removing its gate, keeping the account
                     # browser context alive. Fakes may omit close; production never does.
@@ -389,6 +400,12 @@ class JoinQuantBrowserKeeper:
                 result = replace(result, metadata={**result.metadata, "blocked_request": exc.blocked_request})
         except Exception:
             result = self._stop(context, "browser_operation_failed", paused=True)
+        if completed is not None and result is not completed:
+            # A cleanup failure does not undo an already verified reward. Pause
+            # resource reuse while preserving its receipt and daily write budget.
+            result = replace(completed, metadata={**completed.metadata,
+                "automation_paused": True, "reason": "browser_cleanup_failed",
+                "cleanup_reason": result.metadata.get("reason", "browser_operation_failed")})
         metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"]}
         if progress["reserved"] and result.status is not KeepStatus.SUCCESS:
             metadata["automation_paused"] = True

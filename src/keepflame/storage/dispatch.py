@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import UUID
 
 from keepflame.storage.control import stamp
+from keepflame.core.models import BusinessTarget
 
 
 class DispatchError(ValueError):
@@ -34,6 +35,10 @@ class DispatchStorageMixin:
                 ('requested','running','completed','rejected','expired','cancelled','interrupted')),
             created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
             finished_at TEXT, reason TEXT, run_id TEXT, result_status TEXT)""")
+        existing = {row["name"] for row in connection.execute("PRAGMA table_info(run_requests)")}
+        for name in ("target_day", "target_timezone"):
+            if name not in existing:
+                connection.execute(f"ALTER TABLE run_requests ADD COLUMN {name} TEXT")
         connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_pending_run_request
             ON run_requests(keeper, account_id, flame_id)
             WHERE state IN ('requested','running')""")
@@ -153,8 +158,12 @@ class DispatchStorageMixin:
             if connection.execute("""SELECT 1 FROM run_requests WHERE keeper=? AND account_id=? AND flame_id=?
                 AND state IN ('requested','running')""", (flame.keeper, flame.account_id, flame.id)).fetchone():
                 raise DispatchError('this Flame already has an unfinished request; reuse its request ID')
-            connection.execute("INSERT INTO run_requests VALUES (?,?,?,?,?,?,?,'requested',?,?,NULL,NULL,NULL,NULL)",
-                (identifier, owner['id'], *identity, stamp(now), stamp(now + timedelta(minutes=5))))
+            target = BusinessTarget.at(now, flame.schedule.timezone)
+            connection.execute("""INSERT INTO run_requests
+                (id,owner_id,flame_id,keeper,account_id,config_path,fingerprint,state,created_at,expires_at,
+                 target_day,target_timezone) VALUES (?,?,?,?,?,?,?,'requested',?,?,?,?)""",
+                (identifier, owner['id'], *identity, stamp(now), stamp(now + timedelta(minutes=5)),
+                 target.day, target.timezone))
             return dict(connection.execute('SELECT * FROM run_requests WHERE id=?', (identifier,)).fetchone())
 
     def claim_run(self, owner_id, now):

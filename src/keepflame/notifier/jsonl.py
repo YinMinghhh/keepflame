@@ -57,6 +57,7 @@ class JsonlNotifier:
                 None if result.human_action is None else result.human_action.to_dict()
             ),
             "reward": None if result.reward is None else result.reward.to_dict(),
+            "completion_receipt": None if result.receipt is None else result.receipt.to_dict(),
         }
         line = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self._lock:

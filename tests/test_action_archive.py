@@ -120,7 +120,7 @@ def test_v4_migration_preserves_all_existing_rows_and_blocks_old_client(tmp_path
     with pytest.raises(StorageError):SQLiteStorage(store.path,existing_only=True)
     upgraded=SQLiteStorage(store.path)
     with upgraded._connect() as c:
-        assert c.execute('SELECT version FROM schema_meta').fetchone()[0]==5
+        assert c.execute('SELECT version FROM schema_meta').fetchone()[0]==6
         assert {n:[tuple(r) for r in c.execute('SELECT * FROM '+n)] for n in names}==before
     assert len(upgraded.action_audit('joinquant','primary','reading')['history'])==1
     SQLiteStorage(store.path)

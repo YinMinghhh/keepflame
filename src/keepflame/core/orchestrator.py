@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from keepflame.core.config import FlameConfig
 from keepflame.core.models import (
+    BusinessTarget,
+    CompletionReceipt,
     FlameState,
     KeepResult,
     KeepStatus,
@@ -58,14 +60,28 @@ class Orchestrator:
         *,
         now: datetime | None = None,
         notify: bool = True,
+        business_target: BusinessTarget | None = None,
     ) -> RunOutcome:
         if self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
             raise AutomationPaused("automation is paused; inspect status and resume explicitly")
         started_at = (now or self.clock.now()).astimezone(timezone.utc)
+        target = business_target or BusinessTarget.at(started_at, flame.schedule.timezone)
+        issued: list[CompletionReceipt] = []
+        def issue_receipt() -> CompletionReceipt:
+            observed = self.clock.now().astimezone(timezone.utc)
+            if observed < started_at or not target.contains(observed):
+                raise ValueError("completion outside admitted business target")
+            receipt = CompletionReceipt(target, observed)
+            issued.append(receipt)
+            return receipt
         previous = self.storage.get_state(flame.id, flame.account_id)
         pending = self.storage.get_notification(flame.id, flame.account_id)
         try:
             keeper = self.registry.resolve(flame.keeper)
+            if (target.timezone != flame.schedule.timezone
+                    or getattr(keeper, "business_timezone", target.timezone) != target.timezone
+                    or not target.contains(self.clock.now())):
+                raise ValueError("Keeper business target differs from the admitted schedule")
             context = KeeperContext(
                 flame_id=flame.id,
                 account_id=flame.account_id,
@@ -75,6 +91,8 @@ class Orchestrator:
                 storage=self.storage,
                 now=started_at,
                 clock=self.clock,
+                business_target=target,
+                completion_receipt=issue_receipt,
             )
             result = keeper.keep(context)
         except Exception as exc:
@@ -84,13 +102,31 @@ class Orchestrator:
                 metadata={"error_type": type(exc).__name__},
             )
 
-        finished_at = (now or self.clock.now()).astimezone(timezone.utc)
+        # Always sample the live clock after cleanup; an admission-time `now`
+        # must never freeze the whole scheduler run's timestamps.
+        finished_at = self.clock.now().astimezone(timezone.utc)
+        if result.status is KeepStatus.SUCCESS:
+            if result.receipt is None and target.contains(finished_at) and finished_at >= started_at:
+                result = replace(result, receipt=CompletionReceipt(target, finished_at, "core_return"))
+            elif result.receipt is None or not any(result.receipt is receipt for receipt in issued):
+                result = KeepResult(KeepStatus.FAILED, "Completion requires a valid current-run receipt",
+                    metadata={**result.metadata, "automation_paused": True, "reason": "completion_receipt_missing_or_invalid"},
+                    next_action_at=result.next_action_at)
+        clock_regressed = (finished_at < started_at or
+            result.receipt is not None and finished_at < result.receipt.observed_at)
+        if clock_regressed:
+            result = replace(result, metadata={**result.metadata, "automation_paused": True,
+                             "reason": "clock_regressed"})
+        same_target = previous is not None and previous.last_checked_target == target
+        failures = (previous.consecutive_failures if same_target else 0) + 1
         result = replace(
             result,
+            metadata={**result.metadata, "business_target": target.to_dict()},
             next_action_at=next_after_result(
                 flame.schedule, finished_at, result.status,
                 requested_at=result.next_action_at,
-                consecutive_failures=(0 if previous is None else previous.consecutive_failures) + 1,
+                consecutive_failures=failures,
+                completed_target=None if result.receipt is None else result.receipt.target,
             ),
         )
         event, mark_reminder = self._notification(
@@ -98,12 +134,14 @@ class Orchestrator:
             previous,
             result,
             finished_at,
+            target,
         )
         state = self._transition(
             flame,
             previous,
             result,
             finished_at,
+            target,
         )
         record = RunRecord(
             run_id=str(uuid4()),
@@ -112,28 +150,26 @@ class Orchestrator:
             started_at=started_at,
             finished_at=finished_at,
             result=result,
+            business_target=target,
+            clock_regressed=clock_regressed,
         )
         same_pending = (
             pending is not None
             and pending.result.status is result.status
             and pending.result.message == result.message
             and pending.result.human_action == result.human_action
-            and (
-                event is None
-                or (
-                    event == pending.event
-                    and pending.occurred_at.astimezone(ZoneInfo(flame.schedule.timezone)).date()
-                    == finished_at.astimezone(ZoneInfo(flame.schedule.timezone)).date()
-                )
-            )
+            and (pending.business_target == target or event is None)
+            and (event is None or event == pending.event)
         )
         if same_pending:
-            pending = replace(pending, result=result)
+            if pending.business_target == target:
+                pending = replace(pending, result=result)
         elif event is not None:
             pending = PendingNotification(
                 notification_id=str(uuid4()), flame_id=flame.id, account_id=flame.account_id,
                 event=event, result=result, occurred_at=finished_at, retry_at=finished_at,
                 reminder_at=finished_at if mark_reminder else None,
+                business_target=target,
             )
         else:
             pending = None
@@ -176,16 +212,17 @@ class Orchestrator:
         previous: FlameState | None,
         result: KeepResult,
         checked_at: datetime,
+        target: BusinessTarget,
     ) -> FlameState:
         if result.status is KeepStatus.SUCCESS:
-            last_success = checked_at
+            last_success = result.receipt.observed_at
             failures = 0
             pending_since = None
             action = None
             last_reminder = None
         elif result.status is KeepStatus.FAILED:
             last_success = None if previous is None else previous.last_success_at
-            failures = (0 if previous is None else previous.consecutive_failures) + 1
+            failures = (previous.consecutive_failures if previous is not None and previous.last_checked_target == target else 0) + 1
             pending_since = None
             action = None
             last_reminder = None
@@ -218,6 +255,9 @@ class Orchestrator:
             next_action_at=result.next_action_at,
             last_reminder_at=last_reminder,
             metadata=dict(result.metadata),
+            last_checked_target=target,
+            last_success_receipt=(result.receipt if result.status is KeepStatus.SUCCESS else
+                                  None if previous is None else previous.last_success_receipt),
         )
 
     @classmethod
@@ -227,6 +267,7 @@ class Orchestrator:
         previous: FlameState | None,
         result: KeepResult,
         now: datetime,
+        target: BusinessTarget,
     ) -> tuple[str | None, bool]:
         if result.status is KeepStatus.WAITING_HUMAN:
             action_changed = (
@@ -236,10 +277,10 @@ class Orchestrator:
                 or result.human_action is None
                 or previous.human_action.kind != result.human_action.kind
             )
-            new_schedule_day = cls._is_new_schedule_day(flame, previous, now)
+            new_schedule_day = previous is None or previous.last_checked_target != target
             if action_changed or new_schedule_day:
-                return "human_action_required", cls._at_or_after_reminder(flame, now)
-            if reminder_due(flame.schedule, previous, now):
+                return "human_action_required", target.contains(now) and cls._at_or_after_reminder(flame, now)
+            if target.contains(now) and reminder_due(flame.schedule, previous, now):
                 return "human_action_reminder", True
             return None, False
 
@@ -255,17 +296,6 @@ class Orchestrator:
         if previous is not None and previous.status is not KeepStatus.SUCCESS:
             return "flame_recovered", False
         return None, False
-
-    @staticmethod
-    def _is_new_schedule_day(
-        flame: FlameConfig,
-        previous: FlameState | None,
-        now: datetime,
-    ) -> bool:
-        if previous is None:
-            return True
-        zone = ZoneInfo(flame.schedule.timezone)
-        return previous.last_checked_at.astimezone(zone).date() != now.astimezone(zone).date()
 
     @staticmethod
     def _at_or_after_reminder(flame: FlameConfig, now: datetime) -> bool:

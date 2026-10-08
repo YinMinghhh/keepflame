@@ -14,6 +14,7 @@ from keepflame.capabilities import CapabilityRegistry, FileSecretResolver, Urlli
 from keepflame.capabilities.browser import IsolatedBrowser, OwnedBrowserSession
 from keepflame.capabilities.browser_pool import BrowserPool
 from keepflame.login import LoginCoordinator
+from keepflame.core.models import BusinessTarget
 from keepflame.core.config import AppConfig, ConfigError, load_config
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
@@ -108,7 +109,13 @@ class Runtime:
                       if (f.id, f.keeper, f.account_id) ==
                       (request['flame_id'], request['keeper'], request['account_id'])), None)
         reason = None
-        if self.configuration_blocked or request['fingerprint'] != self.config.source_fingerprint:
+        target = (None if request['target_day'] is None or request['target_timezone'] is None else
+                  BusinessTarget(request['target_day'], request['target_timezone']))
+        if target is None or not target.contains(now):
+            reason = 'business_day_changed'
+        elif flame is not None and target.timezone != flame.schedule.timezone:
+            reason = 'business_timezone_changed'
+        elif self.configuration_blocked or request['fingerprint'] != self.config.source_fingerprint:
             reason = 'configuration_changed'
         elif flame is None:
             reason = 'flame_disabled_or_changed'
@@ -119,9 +126,9 @@ class Runtime:
         outcome = None
         if reason is None:
             self.notifier.emit('daemon_run_started', request_id=request['id'], owner_id=self.dispatch_owner,
-                               flame_id=flame.id)
+                               flame_id=flame.id, business_target=target.to_dict())
             try:
-                outcome = self.orchestrator.run_flame(flame, notify=False)
+                outcome = self.orchestrator.run_flame(flame, notify=False, business_target=target)
             except AutomationPaused:
                 # A pause may have arrived after the previous local check.
                 reason = 'automation_paused'
@@ -132,7 +139,12 @@ class Runtime:
         self.notifier.emit('daemon_run_finished', request_id=request['id'],
                            state='rejected' if reason else 'completed', reason=reason,
                            run_id=None if outcome is None else outcome.record.run_id,
-                           result_status=None if outcome is None else outcome.record.result.status.value)
+                           result_status=None if outcome is None else outcome.record.result.status.value,
+                           business_target=None if target is None else target.to_dict(),
+                           run_started_at=None if outcome is None else outcome.record.started_at.isoformat(),
+                           run_finished_at=None if outcome is None else outcome.record.finished_at.isoformat(),
+                           completion_receipt=(None if outcome is None or outcome.record.result.receipt is None else
+                                               outcome.record.result.receipt.to_dict()))
 
     def blocked(self, flame):
         return (self.configuration_blocked or self.login.blocked(flame)

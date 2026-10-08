@@ -151,7 +151,7 @@ def test_first_request_failure_reaches_keeper_cli_and_jsonl_after_gate_cleanup()
     result = JoinQuantBrowserKeeper(page_factory=lambda *_a, **_kw: gateway).keep(context)
     assert result.status is KeepStatus.FAILED and result.metadata["automation_paused"]
     assert result.metadata["blocked_request"]["phase"] == "reading" and guard.phase == "stopped"
-    record = SimpleNamespace(result=result, finished_at=now, run_id="synthetic", flame_id="reading", account_id="synthetic")
+    record = SimpleNamespace(result=result, started_at=now, business_target=None, clock_regressed=False, finished_at=now, run_id="synthetic", flame_id="reading", account_id="synthetic")
     output = _outcome_dict(SimpleNamespace(record=record))
     stream = StringIO()
     JsonlNotifier(stream).notify("task_failed", notification_id="synthetic", flame_id="reading",
