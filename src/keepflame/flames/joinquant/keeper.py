@@ -114,7 +114,7 @@ def _browser_challenge_action() -> HumanAction:
 
 class JoinQuantKeeper:
     browser_origin = JOINQUANT_ORIGIN
-    login_url = JOINQUANT_ORIGIN + "/user/login"
+    login_url = JOINQUANT_ORIGIN + "/user/login/index"
     login_blocked_paths = ("/credits/", "/common/verifyCode/", "/user/account/getToken", "/community/post/postView")
 
     def __init__(self, sleeper: Callable[[float], None] = time.sleep) -> None:

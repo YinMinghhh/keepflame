@@ -51,7 +51,7 @@ def test_client_handoff_preserves_native_session_and_recovery_gates(tmp_path, mo
                 contexts.append(owned.page.context)
                 def login_fixture(route):
                     # This is below the unchanged pool's owned-page/login gate.
-                    assert route.request.url == JOINQUANT_ORIGIN+'/user/login'
+                    assert route.request.url == JOINQUANT_ORIGIN+'/user/login/index'
                     assert route.request.method == 'GET'
                     route.fulfill(status=200, headers={'content-type':'text/html',
                         'set-cookie':'synthetic_auth=fixture-only; Path=/; HttpOnly; Secure; SameSite=Lax'},
