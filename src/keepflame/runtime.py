@@ -38,6 +38,7 @@ class Runtime:
     configuration_blocked: bool = False
     dispatch_owner: str | None = None
     _closed: bool = False
+    _close_reason: str = "program_exit"
 
     @contextmanager
     def daemon_session(self):
@@ -56,11 +57,24 @@ class Runtime:
                     self.storage.start_dispatch(owner, self.config, self.orchestrator.clock.now())
                     self.notifier.emit('daemon_owner_started', owner_id=owner)
                     yield
+                except BaseException:
+                    self._close_reason = "owner_error"
+                    raise
                 finally:
                     self.close()
 
+    def request_stop(self):
+        self._close_reason = "user_stop"
+        self.service.stop_event.set()
+
+    def _browser_stopped(self):
+        if self.owned_browser is not None and self.owned_browser.closed:
+            self.service.stop_event.set()
+            return True
+        return False
+
     def poll_controls(self):
-        if self._closed or self.service.stop_event.is_set():
+        if self._closed or self.service.stop_event.is_set() or self._browser_stopped():
             return
         # Edits cannot silently leave old enabled tasks running. Only a valid,
         # explicit reload can clear this latch, including after the file is fixed.
@@ -96,7 +110,10 @@ class Runtime:
                 self.storage.finish_command(request['id'], type(exc).__name__)
                 self.notifier.emit('configuration_reload_failed', error_type=type(exc).__name__)
         self.login.tick()
+        if self._browser_stopped():
+            return
         self.dispatch_one()
+        self._browser_stopped()
 
     def dispatch_one(self):
         if self.dispatch_owner is None or self._closed or self.service.stop_event.is_set():
@@ -147,7 +164,10 @@ class Runtime:
                                                outcome.record.result.receipt.to_dict()))
 
     def blocked(self, flame):
-        return (self.configuration_blocked or self.login.blocked(flame)
+        # A preceding scheduled Flame may have stopped this owner after the
+        # tick's control poll. Check before every subsequent Keeper admission.
+        return (self._closed or self.service.stop_event.is_set() or self._browser_stopped()
+                or self.configuration_blocked or self.login.blocked(flame)
                 or self.dispatch_owner is not None
                 and self.storage.has_requested_run(self.dispatch_owner, flame))
 
@@ -163,9 +183,11 @@ class Runtime:
                 self.storage.stop_dispatch(owner, self.orchestrator.clock.now())
         finally:
             if self.owned_browser is not None:
-                self.owned_browser.close()
+                self.owned_browser.close(reason=self._close_reason)
         if owner is not None:
             self.notifier.emit('daemon_owner_stopped', owner_id=owner,
+                               close_reason=(self.owned_browser.close_reason if self.owned_browser is not None
+                                             else self._close_reason),
                                unconfirmed_actions_preserved=True)
 
 
@@ -173,7 +195,10 @@ def build_runtime(
     config_path: str | Path | None = None, *, stream: TextIO | None = None,
     delivery_notifier: Notifier | None = None,
     browser: IsolatedBrowser | OwnedBrowserSession | BrowserPool | None = None,
+    restore_browser_session: bool = False,
 ) -> Runtime:
+    if restore_browser_session and browser is not None:
+        raise ConfigError("browser session restoration requires the runtime-owned browser")
     config = load_config(config_path)
     storage = SQLiteStorage(config.storage.path)
     notifier = JsonlNotifier(stream)
@@ -181,7 +206,8 @@ def build_runtime(
     registry = EntryPointKeeperRegistry()
     for keeper_name in {flame.keeper for flame in config.enabled_flames()}:
         registry.resolve(keeper_name)
-    owned_browser = BrowserPool() if browser is None else None
+    owned_browser = ((BrowserPool(IsolatedBrowser(restore_session=True))
+                      if restore_browser_session else BrowserPool()) if browser is None else None)
     browser_capability = browser if browser is not None else owned_browser
     login = LoginCoordinator(config, storage, registry, browser_capability, clock=clock)
     orchestrator = Orchestrator(

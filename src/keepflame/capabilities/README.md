@@ -17,3 +17,42 @@ CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一�
 服务器首次登记专用目录时（仅在另行获准后），目录必须是当前运行用户拥有的绝对路径、0700，父目录不可组/其他用户写，且位于任何Git仓库之外。新空目录内创建0600的 `.keepflame-profile.json`，内容严格为 `{"version":1,"account_id":"primary","purpose":"keepflame"}`，account_id须与配置一致。不要重用日常Chrome目录或修改已有profile归属。该标记只登记目录身份，不含凭据也不证明已登录；随后再用正式login控制流。
 
 池同时约束 account/origin 只能使用一个 profile。空闲、非当前拥有页、popup和worker的网络默认拒绝；结束任务先关闭所有页再撤插件门禁，关闭失败则保留门禁并停止整个自有池。底层原生请求禁用自动重定向，避免浏览器重定向跳过后续route检查；登录遇到需跳转的新流程时也会停止，不能临时放宽。
+
+## 可选的原生会话恢复
+
+`keepflame run --restore-browser-session --execute --config <path>` 复用现有常驻 owner；
+未加 `--execute` 时只做 dry-run。恢复开关仅供 daemon，不提供给一次性 `run-once`。
+`run` 仍按配置执行启用的 Flame，**它不是纯认证检查命令**；只验证保存时必须使用已审核的
+禁用任务配置，不能把此命令直接用于真实奖励验收。代码接入、登录验证和服务部署分别授权。
+API 等价入口为 `build_runtime(..., restore_browser_session=True)`，不可同时传入借用的 browser。
+
+恢复保留同一 profile 和 Playwright 原有加密参数，不读取/导出 Cookie 或 storage_state，
+不更改有效期、系统钥匙串项或系统网络设置。启动前先占用一个不监听的本机 TCP 端口，
+Chrome 唯一代理指向此端口并禁用 loopback 绕过、直接 DNS、QUIC 和非代理 WebRTC UDP；
+屏障持续到浏览器关闭。仅安装 launch 后的 route 不构成启动屏障。
+
+Chrome 恢复后先全拒绝、关闭恢复页，再启用现有 origin/插件门禁。只有 owner 明确授予的
+新页面可进入 Node 侧 `route.fetch` 转发；迟到的恢复页、popup、worker 和空闲页面均拒绝。
+浏览器原始网络始终被代理屏障阻断。原生 API transport 不走 Chrome CLI 代理，仍由调用方
+的只读/业务门禁约束；此能力不把任意 API 请求自动变成安全请求。
+
+普通任务失败或暂停后关闭业务页并保留空闲 context；无 idle TTL，不刷新或轮询网站保活。
+有界任务通过现有 daemon 客户端完成，客户端退出不关闭 owner。SIGINT/SIGTERM、程序退出、
+owner 故障和门禁清理失败仍关闭自有资源；停止日志记录 `user_stop`、`program_exit`、
+`owner_error` 或 `security_cleanup_failed`。进程必须由用户明确运行的长期 owner 持有；
+此改动不安装服务，也不承诺机器睡眠、崩溃或远端撤销后仍有有效认证。
+
+合成本机 TLS/独立进程恢复试验只验证浏览器机制。真实账号必须另行验证关闭前和重启后
+后端认证状态；不能由合成成功推断真实 10001 的原因或宣称每日免登录已验收。
+
+恢复初始化另有共享 20 秒 driver 请求预算，关闭 context 有 5 秒请求预算。`route()` 等
+没有公开 timeout 参数，`set_default_timeout` 对这些调用无效；适配器仅在本次自有
+Playwright connection 上补齐 protocol timeout metadata，退出相应阶段立即恢复。
+此私有接口只对已复核的 Playwright **1.63.0** 启用，版本/签名不匹配即拒绝恢复，
+不静默回退为无截止调用。driver EOF 使用该版本内建的最多 30 秒关闭兜底；代理端口
+在 driver 退出前保持占用。没有外部扫描或终止其他浏览器，没有改变加密提供者。
+
+初始化截止/失败后不交付 context，pool 以 `restore_startup_failed` 关闭并拒绝再次启动；
+拥有它的 runtime 停止后续控制/任务派发，保留既有 pending 和暂停。普通业务错误仍沿用
+保留 context 的行为。本机制处理可响应的 Playwright driver 中等待浏览器操作的超时；
+不把它宣称为操作系统进程冻结或 Python/driver CPU 死锁的通用 watchdog。

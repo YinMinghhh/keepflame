@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from threading import get_ident
 from urllib.parse import urlsplit
 
-from keepflame.capabilities.browser import BrowserUnavailable, IsolatedBrowser, ProfileNotAuthorized
+from keepflame.capabilities.browser import BrowserUnavailable, BrowserRestoreFailed, IsolatedBrowser, ProfileNotAuthorized
 
 
 @dataclass
@@ -20,6 +20,7 @@ class _Context:
     task_page: object | None = None
     login_page: object | None = None
     login_handler: object | None = None
+    permit_page: object | None = None
 
 
 class BrowserPool:
@@ -31,6 +32,11 @@ class BrowserPool:
         self._contexts = {}
         self._thread = get_ident()
         self._closed = False
+        self.close_reason = None
+
+    @property
+    def closed(self):
+        return self._closed
 
     def _get(self, profile_dir, account_id, origin):
         if self._closed or get_ident() != self._thread:
@@ -46,10 +52,15 @@ class BrowserPool:
             return slot
         if len(self._contexts) >= self.max_accounts:
             raise BrowserUnavailable("browser account limit reached")
-        owned = self._stack.enter_context(self.browser.session(
-            profile_dir=profile_dir, account_id=account_id, origin=origin, headless=self.headless))
+        try:
+            owned = self._stack.enter_context(self.browser.session(
+                profile_dir=profile_dir, account_id=account_id, origin=origin, headless=self.headless))
+        except Exception as exc:
+            if isinstance(exc, BrowserRestoreFailed) or getattr(self.browser, 'restore_session', False):
+                self.close(reason="restore_startup_failed")
+            raise
         context = owned.page.context
-        slot = _Context(context, identity)
+        slot = _Context(context, identity, permit_page=getattr(owned, 'permit_page', None))
         self._contexts[profile_dir] = slot
 
         def owned_page_only(route):
@@ -69,7 +80,7 @@ class BrowserPool:
             for page in list(context.pages):
                 page.close()
         except Exception:
-            self.close()
+            self.close(reason="security_cleanup_failed")
             raise BrowserUnavailable("browser startup cleanup failed") from None
         return slot
 
@@ -83,6 +94,8 @@ class BrowserPool:
         try:
             page = slot.context.new_page()
             slot.task_page = page
+            if slot.permit_page is not None:
+                slot.permit_page(page)
             yield page
         finally:
             # Plugin route cleanup happens before this fallback. Always close its page.
@@ -91,7 +104,7 @@ class BrowserPool:
                 for owned_page in list(slot.context.pages):
                     owned_page.close()
             except Exception:
-                self.close()
+                self.close(reason="security_cleanup_failed")
                 raise BrowserUnavailable("browser task cleanup failed") from None
             finally:
                 slot.busy = False
@@ -115,6 +128,8 @@ class BrowserPool:
         slot.context.route('**/*', guard)
         try:
             slot.login_page = slot.context.new_page()
+            if slot.permit_page is not None:
+                slot.permit_page(slot.login_page)
             slot.login_page.goto(login_url, wait_until='domcontentloaded', timeout=20_000)
         except Exception:
             self.end_login(profile_dir)
@@ -139,10 +154,13 @@ class BrowserPool:
             slot.login_handler = None
         except Exception:
             # Keep the gate until the entire owned context closes; never reuse it.
-            self.close()
+            self.close(reason="security_cleanup_failed")
             raise BrowserUnavailable("login cleanup failed; browser pool stopped") from None
 
-    def close(self):
+    def close(self, *, reason="program_exit"):
+        if self._closed:
+            return
         self._closed = True
+        self.close_reason = reason
         self._stack.close()
         self._contexts.clear()

@@ -39,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument('--via-daemon', action='store_true',
                                  help='queue one bounded run in the existing daemon context; never start a browser')
             command.add_argument('--request-id', help='stable UUID for idempotent daemon submission')
+        if name == 'run':
+            command.add_argument('--restore-browser-session', action='store_true',
+                                 help='opt in to native session restore behind the startup network barrier')
         if name == "resume":
             command.add_argument("--account", action="store_true", help="also resume this Keeper account after manually resolving authentication")
         if name == "login":
@@ -218,7 +221,7 @@ def _health(runtime: Runtime) -> int:
 
 def _run_daemon(runtime: Runtime) -> int:
     def stop(_signum, _frame) -> None:
-        runtime.service.stop_event.set()
+        runtime.request_stop()
 
     previous_handlers = {
         signal.SIGINT: signal.signal(signal.SIGINT, stop),
@@ -374,7 +377,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"event": "configuration_reload_requested", "request_id": identifier,
                               "message": "Check runtime_commands for completion; the database path must remain unchanged."}))
             return 0
-        runtime = build_runtime(args.config)
+        runtime = (build_runtime(args.config, restore_browser_session=True)
+                   if args.command == 'run' and args.restore_browser_session else build_runtime(args.config))
         if args.command == 'run':
             with runtime.daemon_session():
                 return _run_daemon(runtime)

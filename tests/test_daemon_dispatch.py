@@ -390,10 +390,10 @@ def test_stop_cancels_queued_work_and_closes_browser_before_unlock(tmp_path, mon
     runtime, browser, pool, visits, clock, _ = setup(tmp_path, monkeypatch)
     original_close = pool.close
     checks = []
-    def close():
+    def close(**kwargs):
         status = runtime.storage.dispatch_status()
         checks.append((status['runner_lock_held'], status['daemon_owner_lock_held']))
-        original_close()
+        original_close(**kwargs)
     monkeypatch.setattr(pool, 'close', close)
     with runtime.daemon_session():
         row = submit(runtime)

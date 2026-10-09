@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import os
 import stat
@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 
 class BrowserUnavailable(RuntimeError):
     pass
+
+
+class BrowserRestoreFailed(BrowserUnavailable):
+    """A failed restore invalidates its owner; never silently launch it again."""
 
 
 class ProfileNotAuthorized(BrowserUnavailable):
@@ -67,11 +71,19 @@ def validate_profile(reference: str, account_id: str) -> Path:
 class OwnedBrowserSession:
     """One in-process handoff from an IsolatedBrowser-owned login session."""
 
-    def __init__(self, page, *, profile_dir: str, account_id: str, origin: str):
+    def __init__(self, page, *, profile_dir: str, account_id: str, origin: str, permit_page=None):
         self._page = page
         self._identity = (profile_dir, account_id, origin)
         self._active = True
         self._claimed = False
+        self._permit_page = permit_page
+
+    def permit_page(self, page):
+        """Admit the pool's newly created task/login page, never restored tabs."""
+        if not self._active or page.context is not self._page.context:
+            raise BrowserUnavailable("page does not belong to the owned context")
+        if self._permit_page is not None:
+            self._permit_page(page)
 
     @property
     def page(self):
@@ -94,6 +106,9 @@ class OwnedBrowserSession:
 
 
 class IsolatedBrowser:
+    def __init__(self, *, restore_session: bool = False):
+        self.restore_session = restore_session
+
     @contextmanager
     def open(self, *, profile_dir: str, account_id: str, origin: str, headless: bool = True):
         options = dict(profile_dir=profile_dir, account_id=account_id, origin=origin, headless=headless)
@@ -119,8 +134,24 @@ class IsolatedBrowser:
         if urlsplit(origin).scheme != "https" or not host:
             raise BrowserUnavailable("browser origin must be HTTPS")
         base_domain = host.removeprefix("www.")
+        admitted_page = None
+
+        def permit_page(page):
+            nonlocal admitted_page
+            admitted_page = page
 
         def route_request(route):
+            if self.restore_session:
+                # A late request from a restored/closed page or worker must not
+                # reach the Node transport after startup cleanup has finished.
+                try:
+                    request_page = route.request.frame.page
+                    if request_page is not admitted_page or request_page.is_closed():
+                        route.abort("blockedbyclient")
+                        return
+                except Exception:
+                    route.abort("blockedbyclient")
+                    return
             target = urlsplit(route.request.url)
             if target.scheme == "https" and target.port in (None, 443) and (
                 target.hostname == host or target.hostname == "cdn." + base_domain
@@ -142,24 +173,65 @@ class IsolatedBrowser:
             else:
                 route.abort("blockedbyclient")
 
-        with sync_playwright() as playwright:
+        from keepflame.capabilities.browser_restore import restore_barrier, restore_deadline, require_bounded_driver
+
+        if self.restore_session:
+            try:
+                require_bounded_driver()
+            except Exception:
+                raise BrowserRestoreFailed("unsupported browser restore driver") from None
+
+        barrier = restore_barrier() if self.restore_session else nullcontext([])
+        # The barrier encloses launch AND close. A route installed after launch
+        # cannot stop restored pages from making startup requests by itself.
+        with barrier as restore_args, sync_playwright() as playwright:
             context = None
             session = None
             try:
-                context = playwright.chromium.launch_persistent_context(
-                    str(profile), channel="chrome", headless=headless,
-                    chromium_sandbox=True, timeout=20_000,
-                    accept_downloads=False, service_workers="block",
-                    args=["--disable-background-networking", "--disable-component-update"],
-                )
-                context.set_default_timeout(5_000)
-                context.route("**/*", route_request)
-                context.route_web_socket("**/*", lambda socket: socket.close())
-                page = context.new_page()
-                session = OwnedBrowserSession(page, profile_dir=str(profile), account_id=account_id, origin=origin)
+                startup = restore_deadline(playwright, 20) if self.restore_session else nullcontext()
+                with startup:
+                    context = playwright.chromium.launch_persistent_context(
+                        str(profile), channel="chrome", headless=headless,
+                        chromium_sandbox=True, timeout=20_000,
+                        accept_downloads=False, service_workers="block",
+                        args=["--disable-background-networking", "--disable-component-update", *restore_args],
+                    )
+                    context.set_default_timeout(5_000)
+                    if self.restore_session:
+                        def deny_startup(route):
+                            route.abort("blockedbyclient")
+
+                        context.route("**/*", deny_startup)
+                        context.route_web_socket("**/*", lambda socket: socket.close())
+                        try:
+                            for restored_page in list(context.pages):
+                                restored_page.close()
+                        except Exception:
+                            raise BrowserUnavailable("restored page cleanup failed") from None
+                        # Every old page is closed before the forwarding route can
+                        # be enabled. The Chrome proxy barrier stays in place.
+                        context.unroute("**/*", deny_startup)
+                    context.route("**/*", route_request)
+                    context.route_web_socket("**/*", lambda socket: socket.close())
+                    page = context.new_page()
+                    permit_page(page)
+                    session = OwnedBrowserSession(page, profile_dir=str(profile), account_id=account_id,
+                                                  origin=origin, permit_page=permit_page)
+            except Exception:
+                if self.restore_session:
+                    raise BrowserRestoreFailed("browser restore startup failed") from None
+                raise
+            else:
                 yield session
             finally:
                 if session is not None:
                     session._expire()
                 if context is not None:
-                    context.close()
+                    try:
+                        cleanup = restore_deadline(playwright, 5) if self.restore_session else nullcontext()
+                        with cleanup:
+                            context.close()
+                    except Exception:
+                        if self.restore_session:
+                            raise BrowserRestoreFailed("browser restore cleanup failed") from None
+                        raise
