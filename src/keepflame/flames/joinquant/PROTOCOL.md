@@ -67,7 +67,7 @@
 | GET `/user/account/getToken` | 阅读阶段 1 | 详情已确认为受支持文章，原页面自然请求 |
 | POST `/community/post/postView` | 1 | 原任务页主 frame、精确 URL、本轮 postId、表单只含 postId/appKey/appSecret、已取阅读签名 |
 | GET `/view/user/floor?type=creditsdesc` | 1（门禁硬上限2） | 资格已确认后，为领取按钮加载官方积分页 |
-| GET `/credits/task/getTaskInfo` 页面渲染 | 1 | 仅积分页加载阶段，经原生 transport；不作为 Keeper 完成证据 |
+| GET `/credits/task/getTaskInfo` 页面渲染 | 2 | 外层 floor 与内层 credit-center 各一次；仅第一份积分 document 的本任务主 frame、精确 URL、加载阶段、xhr/fetch、空 body，经原生 transport；不作为 Keeper 完成证据 |
 | GET `/credits/task/getTaskInfo` Keeper 查询 | 5 | 初查1、资格后查1、最终最多3；与渲染读分开计数 |
 | 挑战/答案/最终领取 | 各1 | 复用既有签到门禁，最终 ruleKey 固定 post_view；领取回调 curRuleKey/tokenType 也须匹配 |
 | GET `/user/account/getToken` 领取准备 | 1 | 答案通过后的领取回调；不复用阅读签名预算 |
@@ -81,3 +81,21 @@
 动作记录在自然阅读登记之前或领取挑战之前 reserve。pending 跨日阻断新动作；已确认当日也阻断重复尝试。未知完成返回 claim_unconfirmed，明确要求人工检查；普通恢复不清除动作记录，只有后端完成才能 confirm。所有退出路径关闭任务页再移除本轮 handler，不关闭整个账号 context。图像只在内存，Pillow 对象 finally 关闭；浏览器缓存的剩余边界不作无落盘保证。
 
 复核补强：文章和积分页document通过原生无重定向transport获取，再交回原页面执行；静态资源底层同样不自动跟随重定向。关闭任务context所有页面成功后才撤本轮门禁，失败由browser pool停止整个自有上下文。未知应用code只记unknown；服务器时间仅保留可解析的时间或有界数字，不持久化任意返回值。
+
+## 双组件积分入口与诊断（2026-10-09 离线修复）
+
+同一公开积分分块（SHA-256 `de672a04511bcf4c29714dc88074b0e45352cf78401fa1434d869f7ecc44e08a`）的 module 438 外层 floor.created() 先调用自己的 fetchTaskInfo()，只更新 isSignin；module 665 内层 credit-center.created() 再调用自己的 fetchTaskInfo()，才更新 taskList。module 531 以 status 的 undefined/0/1 选择 slot，module 667 给阅读卡片提供“去看看”/“立即领取”/“已完成”。没有文案变化的缓存源码证据。
+
+原页面渲染 GET 上限 1 会让先运行的父组件耗尽额度，子组件的请求被静默阻断，taskList.post_view 默认 {}，无法出现“立即领取”。原单 GET、直接创建按钮的 fixture 没有覆盖两个独立消费者。更新的合成页重建父子请求、初始默认 slot、Element UI 的 span/空白及父组件回调链；它不是保存的真实页面，也不执行完整官方 Vue bundle。旧代码在此 fixture 上复现 reading_button_changed、page_status=1、全部写入 0、DOM 仍显示“去看看”。2026-10-09 实测没有保存 DOM 或被阻断的第二个 GET，因此这证明代码存在该机制，不能证明它是那次实测的唯一原因。
+
+现在仅此已知只读路径允许两次，每次原样转交原生响应，不合并、缓存重放或伪造后端状态。额外初始读取以 page_status_budget 停止；非本任务主 frame、非精确积分页、错误阶段或带参数/请求体不放行。领取后的页面刷新仍阻断，完成仍由 Keeper 独立原生状态确认。所有写请求的路径、参数、规则、阶段与各一次预算保持原样。403/429 等响应先停止，不重试、不追加状态请求。
+
+reading_entry 是尽力采证，不是一次新的浏览器操作。失败后仅复制本地已经完成的安全检查：card_count、claim_count、claim_enabled；字段未出现表示没有观测到，不等于0。两个计数封顶3（表示至少3），Python校验固定键、类型和范围。不读取DOM、文本、属性或凭据，不创建CDP session、异步任务或线程，不延长任务deadline。记录 available=false 和固定原因 post_failure_read_skipped；如果本地总预算已耗尽，原因是 task_budget_exhausted。原定位失败或取消继续传播，诊断不能覆盖它，也没有新增资源等待清理。
+
+此限制修复了早期v2诊断的退出回归：renderer在诊断开始前已卡死时，同步CDP Runtime.evaluate调用本身可能不返回，参数timeout仅约束脚本执行，不能保证协议等待的墙钟上限。旧版同反例可正常退出，v2却依赖测试监督器结束。因此不再在故障路径发起主动DOM采集，也不改成无界等待、后台线程或取消后遗留任务。已有定位超时、任务总预算、页面关闭和请求门禁仍生效；缺失DOM证据明确保留为缺口。不能用已有后端状态或局部定位观察冒充完整DOM快照。
+
+blocked_page_status 是被阻断的已知页面状态 GET 计数，封顶100；它不能消耗或冒充Keeper的status计数。重复或禁用领取按钮在arm_challenge前拒绝。未知标签、已完成卡片、缺失资格或回调身份变化都不能触发后备点击。
+
+门禁只在收到当前context的close事件后，才将其拦截器视为已随context销毁，不再向已关闭context重复unroute。close与unroute并发时也以这一确知事件为依据；存活context的未知清理错误仍传播。关闭监听器在所有退出路径移除，不引入额外CDP任务、线程或后台诊断。
+
+此次修复不改变 pending、暂停、业务日期、完成回执或归档规则；零写入不授权清空 pending 或再运行。当次真实阅读仍未闭环，新的真实尝试必须单独授权，不能把本地 fixture 通过当成真实积分到账。

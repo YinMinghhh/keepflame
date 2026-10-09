@@ -28,6 +28,8 @@ class JoinQuantPage:
             raise FlowError("unexpected_origin")
         self.origin = origin
         self.task = task or task_from_settings({})
+        self.reading_entry = None
+        self._entry_observations = {}
         self.guard = SignInGuard(page, deadline=deadline, request_fetch=request_fetch, task=self.task.name, date_fence=date_fence)
 
     def close(self):
@@ -83,17 +85,53 @@ class JoinQuantPage:
                 cards.first.wait_for(state="visible", timeout=self.timeout(5_000))
             except Exception as exc:
                 self.guard.check()
+                self._diagnose_reading_entry()
                 raise FlowError("reading_card_changed") from exc
-            if cards.count() != 1:
+            card_count = cards.count()
+            self._entry_observations["card_count"] = min(card_count, 3)
+            if card_count != 1:
+                self._diagnose_reading_entry()
                 raise FlowError("reading_card_changed")
             button = cards.get_by_role("button", name=self.task.button, exact=True)
             try:
                 button.first.wait_for(state="visible", timeout=self.timeout(5_000))
             except Exception as exc:
                 self.guard.check()
+                self._diagnose_reading_entry()
                 raise FlowError("reading_button_changed") from exc
+            claim_count = button.count()
+            self._entry_observations["claim_count"] = min(claim_count, 3)
+            if claim_count != 1:
+                self._diagnose_reading_entry()
+                raise FlowError("reading_button_changed")
+            enabled = button.is_enabled()
+            self._entry_observations["claim_enabled"] = enabled
+            if not enabled:
+                self._diagnose_reading_entry()
+                raise FlowError("reading_button_changed")
             return button
         return self.page.get_by_role("button", name="签到", exact=True)
+
+    def _diagnose_reading_entry(self):
+        """Record completed checks only: a failed renderer must never be queried.
+
+        Even CDP Runtime.evaluate(timeout=...) can wait forever before execution
+        begins. Optional evidence cannot add a protocol wait, task, thread or
+        session to the failure/cleanup path. Missing fields are unobserved, not 0.
+        """
+        observed = {}
+        for key in ("card_count", "claim_count"):
+            value = self._entry_observations.get(key)
+            if type(value) is int and 0 <= value <= 3:
+                observed[key] = value
+        enabled = self._entry_observations.get("claim_enabled")
+        if type(enabled) is bool:
+            observed["claim_enabled"] = enabled
+        self.reading_entry = {
+            "available": False,
+            "reason": "task_budget_exhausted" if time.monotonic() >= self.deadline else "post_failure_read_skipped",
+            "observed": observed,
+        }
 
     def challenge(self):
         button = self._button()
@@ -414,6 +452,8 @@ class JoinQuantBrowserKeeper:
             failure = getattr(gateway.guard, "failure", None)
             if failure is not None and failure.blocked_request is not None:
                 metadata["blocked_request"] = failure.blocked_request
+            if getattr(gateway, "reading_entry", None) is not None:
+                metadata["reading_entry"] = gateway.reading_entry
             metadata["write_guard_schema"] = 1
             metadata["stage_counts"] = {
                 "status": counts["status"], "page_status": counts["page_status"],
@@ -422,5 +462,6 @@ class JoinQuantBrowserKeeper:
                 "answer": counts["/common/verifyCode/validate"],
                 "claim": counts["/credits/task/receiveCredits"],
                 "blocked_algorithm_list": counts["blocked_algorithm_list"],
+                "blocked_page_status": counts["blocked_page_status"],
             }
         return replace(result, metadata=metadata)

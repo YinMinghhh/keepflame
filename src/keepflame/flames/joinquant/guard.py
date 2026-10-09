@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from keepflame.capabilities.http import HttpRequest, HttpResponse
-from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, TASK_INFO_URL, _unique_json_object
+from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, TASK_INFO_URL, _unique_json_object
 
 CHALLENGE_PATH = "/common/verifyCode/captchar"
 VALIDATE_PATH = "/common/verifyCode/validate"
@@ -55,14 +55,33 @@ class SignInGuard:
         self.article_allowed = False
         self._handler = self.route
         self._closed = False
+        self._context_closed = False
+        self._close_listener = None
         page.context.route("**/*", self._handler)
+        if callable(getattr(page.context, "on", None)):
+            self._close_listener = self._on_context_closed
+            page.context.on("close", self._close_listener)
+
+    def _on_context_closed(self, *_):
+        self._context_closed = True
 
     def close(self):
         """Remove only this run's handler; the account context belongs to its pool."""
         if not self._closed:
             self._closed = True
             self.phase = "stopped"
-            self.page.context.unroute("**/*", self._handler)
+            try:
+                if not self._context_closed:
+                    self.page.context.unroute("**/*", self._handler)
+            except Exception:
+                # Context closure already removed interception. Only a received
+                # close event for this exact context can settle this cleanup race.
+                if not self._context_closed:
+                    raise
+            finally:
+                if self._close_listener is not None:
+                    self.page.context.remove_listener("close", self._close_listener)
+                    self._close_listener = None
 
     def begin_reading(self, *, article_id, article_url):
         self.check()
@@ -207,6 +226,9 @@ class SignInGuard:
             return
         # Login has its own user-controlled browser phase; this guard never logs in.
         if method == "GET" and not parsed.fragment:
+            if origin == JOINQUANT_ORIGIN and path == "/credits/task/getTaskInfo":
+                self._page_status(route)
+                return
             if request.resource_type in {"script","stylesheet","image","font"} and origin in {
                 JOINQUANT_ORIGIN, "https://cdn.joinquant.com"
             } and path.startswith("/themes/jq/static/"):
@@ -239,11 +261,6 @@ class SignInGuard:
                     route.abort("blockedbyclient")
                     return
             if origin == JOINQUANT_ORIGIN and self.phase == "loading":
-                if (self.task == "reading" and path == "/credits/task/getTaskInfo" and not parsed.query
-                        and self.counts["page_status"] == 0):
-                    self.counts["page_status"] += 1
-                    self.forward(route, "page_status", 1_048_576)
-                    return
                 if path == "/view/user/floor" and parsed.query == "type=creditsdesc" and self.counts["navigation"] < (2 if self.task == "reading" else 1):
                     self.counts["navigation"] += 1
                     self.forward(route, "credits_document", 2_097_152)
@@ -291,6 +308,29 @@ class SignInGuard:
             self.stop("signin_parameters_changed", request=request)
         else:
             self.stop("write_phase_changed", request=request)
+        route.abort("blockedbyclient")
+
+    def _page_status(self, route):
+        """Two independent created() readers, never a completion confirmation."""
+        request = route.request
+        try:
+            credit_frame = (request.frame.page is self.page and request.frame is self.page.main_frame
+                            and request.frame.url == SIGNIN_PAGE_URL)
+        except Exception:
+            credit_frame = False
+        if (self.task == "reading" and self.phase == "loading" and credit_frame
+                and self.counts["navigation"] == 1 and request.url == TASK_INFO_URL
+                and request.resource_type in {"xhr", "fetch"} and request.post_data in (None, "")):
+            # The floor and credit-center components each issue one native GET.
+            # An extra initial read signals drift; do not silently starve the UI.
+            if self.counts["page_status"] < 2:
+                self.counts["page_status"] += 1
+                self.forward(route, "page_status", 1_048_576)
+                return
+            self.stop("page_status_budget", request=request)
+        # Callback refreshes after submission remain blocked. They cannot spend
+        # the separate Keeper status budget or supply completion evidence.
+        self.counts["blocked_page_status"] = min(100, self.counts["blocked_page_status"] + 1)
         route.abort("blockedbyclient")
 
     def _block_algorithm_list(self, route):

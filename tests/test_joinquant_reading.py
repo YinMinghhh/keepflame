@@ -258,10 +258,14 @@ def test_task_rule_is_fixed_and_gate_cleanup_does_not_remove_other_handlers():
 
 
 def test_ui_status_forwarding_is_native_and_not_a_completion_confirmation():
-    guard, _, _ = reading_guard()
+    guard, page, _ = reading_guard()
     guard.phase = "loading"
+    guard.counts["navigation"] = 1
+    page.main_frame.url = JOINQUANT_ORIGIN+"/view/user/floor?type=creditsdesc"
     route = Route(Reply(body=b'{"code":"00000","data":{"taskList":{"post_view":{"status":1}}}}'),
                   url=JOINQUANT_ORIGIN+"/credits/task/getTaskInfo", method="GET")
+    route.request.frame = page.main_frame
+    route.request.post_data = None
     guard.route(route)
     assert route.delivered and guard.counts["page_status"] == 1 and guard.counts["status"] == 0
     assert route.fetched[0]["max_redirects"] == route.fetched[0]["max_retries"] == 0
