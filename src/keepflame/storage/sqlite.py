@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from keepflame.core.protocols import StorageError
 from keepflame.core.models import (
     BusinessTarget,
     CompletionReceipt,
@@ -28,11 +29,6 @@ from keepflame.storage.archive import ArchiveStorageMixin
 from keepflame.storage.dispatch import DispatchStorageMixin
 
 SCHEMA_VERSION = 6
-
-
-class StorageError(RuntimeError):
-    """Raised when the database cannot preserve lifecycle state safely."""
-
 
 def _timestamp(value: datetime | None) -> str | None:
     if value is None:
@@ -53,6 +49,13 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _loads(value: str, *, what: str):
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise StorageError(f"corrupt {what} in database") from exc
+
+
 def _action_json(action: HumanAction | None) -> str | None:
     return None if action is None else _json(action.to_dict())
 
@@ -60,13 +63,18 @@ def _action_json(action: HumanAction | None) -> str | None:
 def _action(value: str | None) -> HumanAction | None:
     if value is None:
         return None
-    raw = json.loads(value)
-    return HumanAction(
-        kind=raw["kind"],
-        summary=raw["summary"],
-        instructions=raw["instructions"],
-        url=raw.get("url"),
-    )
+    try:
+        raw = _loads(value, what="human action")
+        return HumanAction(
+            kind=raw["kind"],
+            summary=raw["summary"],
+            instructions=raw["instructions"],
+            url=raw.get("url"),
+        )
+    except StorageError:
+        raise
+    except (TypeError, ValueError, KeyError) as exc:
+        raise StorageError("corrupt human action in database") from exc
 
 
 def _notification_json(value: PendingNotification) -> str:
@@ -79,20 +87,25 @@ def _notification_json(value: PendingNotification) -> str:
 
 
 def _notification(value: str) -> PendingNotification:
-    raw = json.loads(value)
-    result = raw.pop("result")
-    result["status"] = KeepStatus(result["status"])
-    result["receipt"] = None if result.get("receipt") is None else CompletionReceipt.from_dict(result["receipt"])
-    raw["business_target"] = None if raw.get("business_target") is None else BusinessTarget(**raw["business_target"])
-    result["next_action_at"] = _datetime(result["next_action_at"])
-    if result["human_action"] is not None:
-        result["human_action"] = HumanAction(**result["human_action"])
-    if result["reward"] is not None:
-        result["reward"]["source"] = RewardSource(result["reward"]["source"])
-        result["reward"] = Reward(**result["reward"])
-    for name in ("occurred_at", "retry_at", "reminder_at"):
-        raw[name] = _datetime(raw[name])
-    return PendingNotification(result=KeepResult(**result), **raw)
+    try:
+        raw = _loads(value, what="pending notification")
+        result = raw.pop("result")
+        result["status"] = KeepStatus(result["status"])
+        result["receipt"] = None if result.get("receipt") is None else CompletionReceipt.from_dict(result["receipt"])
+        raw["business_target"] = None if raw.get("business_target") is None else BusinessTarget(**raw["business_target"])
+        result["next_action_at"] = _datetime(result["next_action_at"])
+        if result["human_action"] is not None:
+            result["human_action"] = HumanAction(**result["human_action"])
+        if result["reward"] is not None:
+            result["reward"]["source"] = RewardSource(result["reward"]["source"])
+            result["reward"] = Reward(**result["reward"])
+        for name in ("occurred_at", "retry_at", "reminder_at"):
+            raw[name] = _datetime(raw[name])
+        return PendingNotification(result=KeepResult(**result), **raw)
+    except StorageError:
+        raise
+    except (TypeError, ValueError, KeyError) as exc:
+        raise StorageError("corrupt pending notification in database") from exc
 
 
 class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMixin):
@@ -206,24 +219,30 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
 
     @staticmethod
     def _state_from_row(row: sqlite3.Row) -> FlameState:
-        return FlameState(
-            flame_id=row["flame_id"],
-            account_id=row["account_id"],
-            status=KeepStatus(row["status"]),
-            message=row["message"],
-            last_checked_at=_datetime(row["last_checked_at"]),  # type: ignore[arg-type]
-            last_success_at=_datetime(row["last_success_at"]),
-            consecutive_failures=row["consecutive_failures"],
-            pending_human_since=_datetime(row["pending_human_since"]),
-            human_action=_action(row["human_action_json"]),
-            next_action_at=_datetime(row["next_action_at"]),
-            last_reminder_at=_datetime(row["last_reminder_at"]),
-            metadata=json.loads(row["metadata_json"]),
-            last_checked_target=(None if row["last_checked_target_json"] is None else
-                                 BusinessTarget(**json.loads(row["last_checked_target_json"]))),
-            last_success_receipt=(None if row["last_success_receipt_json"] is None else
-                                  CompletionReceipt.from_dict(json.loads(row["last_success_receipt_json"]))),
-        )
+        try:
+            return FlameState(
+                flame_id=row["flame_id"],
+                account_id=row["account_id"],
+                status=KeepStatus(row["status"]),
+                message=row["message"],
+                last_checked_at=_datetime(row["last_checked_at"]),  # type: ignore[arg-type]
+                last_success_at=_datetime(row["last_success_at"]),
+                consecutive_failures=row["consecutive_failures"],
+                pending_human_since=_datetime(row["pending_human_since"]),
+                human_action=_action(row["human_action_json"]),
+                next_action_at=_datetime(row["next_action_at"]),
+                last_reminder_at=_datetime(row["last_reminder_at"]),
+                metadata=_loads(row["metadata_json"], what="Flame metadata"),
+                last_checked_target=(None if row["last_checked_target_json"] is None else
+                                     BusinessTarget(**_loads(row["last_checked_target_json"], what="business target"))),
+                last_success_receipt=(None if row["last_success_receipt_json"] is None else
+                                      CompletionReceipt.from_dict(
+                                          _loads(row["last_success_receipt_json"], what="completion receipt"))),
+            )
+        except StorageError:
+            raise
+        except (TypeError, ValueError, KeyError) as exc:
+            raise StorageError("corrupt Flame state in database") from exc
 
     def get_state(self, flame_id: str, account_id: str) -> FlameState | None:
         try:

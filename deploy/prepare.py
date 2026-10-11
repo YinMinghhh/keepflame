@@ -345,7 +345,7 @@ def render_plan(server_home: Path, commit: str) -> tuple[dict[str, object], dict
                  "--config", str(paths["config"])]
     agent = {
         "Label": "com.keepflame.runner", "Disabled": True, "RunAtLoad": False,
-        "KeepAlive": False, "ThrottleInterval": 300, "ExitTimeOut": 240, "Umask": 0o077,
+        "KeepAlive": True, "ThrottleInterval": 300, "ExitTimeOut": 240, "Umask": 0o077,
         "LimitLoadToSessionType": "Aqua", "ProgramArguments": arguments,
         "WorkingDirectory": str(paths["release"]),
         "EnvironmentVariables": {"TZ": "Asia/Shanghai", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"},

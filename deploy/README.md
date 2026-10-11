@@ -43,7 +43,7 @@ python3.13 -I -B deploy/prepare.py plan \
 | `.../profiles/joinquant-primary/` | 本机单独登记并本人登录的专用 Chrome，0700；不用普通浏览器或远程调试端口 |
 | `~/Library/Logs/KeepFlame/` | 脱敏 stdout/stderr；目录0700，日志0600；与发布包和 profile 分开 |
 
-候选 LaunchAgent 绑定具体提交的 Python，调用 `python -I -B -m keepflame run --config ...`，**没有 `--execute`**。它同时设 `Disabled=true`、`RunAtLoad=false`、`KeepAlive=false`，仅生成供审查，不能误认为已经装载或启用。配置所有 Flame 停用与 CLI dry-run 是两道独立门槛。真正执行需要服务器阶段另行批准后，操作者同时审查任务开关和执行参数。
+候选 LaunchAgent 绑定具体提交的 Python，调用 `python -I -B -m keepflame run --config ...`，**没有 `--execute`**。它同时设 `Disabled=true`、`RunAtLoad=false`、`KeepAlive=true`，仅生成供审查，不能误认为已经装载或启用。`KeepAlive=true` 表示一旦审查后启用，崩溃或状态损坏告警后的异常退出可由 launchd 拉起；停用态下不会因此自动开跑。配置所有 Flame 停用与 CLI dry-run 是两道独立门槛。真正执行需要服务器阶段另行批准后，操作者同时审查任务开关和执行参数。
 
 ## 3. 安装前只读核查
 
@@ -95,7 +95,7 @@ python3.13 -I -B deploy/prepare.py plan \
 
 业务日界线、窗口与退避由 KeepFlame 调度；不要再用 `StartInterval`、cron 或系统日历反复调用 `run-once`。一个账户/任务只有一个生产 runner、一个数据库；文件锁无法替两个数据库或两台机器互锁。任务需登录时等待本人，不在后台重建浏览器反复试登；进程退出后先诊断再重启。
 
-候选 `KeepAlive=false` 故**没有自动崩溃重启**。`ThrottleInterval=300` 只是为后续审查保留节流值，不是重启次数上限；不要把它当成防止无限重试。`ExitTimeOut=240` 给最长120秒阅读、60秒操作及关闭自有浏览器留出余量。常驻进程收到 SIGTERM 后停止接新任务，等待当前一轮受限流程收尾，再关闭自己拥有的浏览器；不能在领取途中仅因45秒退出期限而提前杀死进程。若仍被强制终止，恢复须遵守已经落盘的执行意图/不明结果状态。
+候选 `KeepAlive=true`，因此**启用后**崩溃可由 launchd 拉起；`Disabled=true` 时仍不会启动。`ThrottleInterval=300` 限制重启节流，不是无限重试许可。`ExitTimeOut=240` 给最长120秒阅读、60秒操作及关闭自有浏览器留出余量。常驻进程收到 SIGTERM 后停止接新任务，等待当前一轮受限流程收尾，再关闭自己拥有的浏览器；不能在领取途中仅因45秒退出期限而提前杀死进程。若仍被强制终止，恢复须遵守已经落盘的执行意图/不明结果状态。
 
 版本切换或回退均是后续人工批准动作，没有一键切换脚本：先停用并等待唯一旧 runner 退出，保留上一提交及候选配置；停服后用 SQLite 一致性备份（或 SQLite 在线备份 API）保存状态，不能只拷贝活跃主 `.sqlite3` 漏掉 WAL。备份不含 profile、凭据或认证页面。只改变 plist 的完整 release 路径；不覆盖旧代码、不搬状态、不删除目录。
 

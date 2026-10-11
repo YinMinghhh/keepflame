@@ -301,7 +301,7 @@ def test_plan_has_disabled_distinct_tasks_and_version_pinned_dry_run_agent(tmp_p
     assert "article_url" not in config["flames"][1]["settings"]
     assert "cookie" not in config["flames"][0]["settings"]
     agent = plistlib.loads(files["com.keepflame.runner.plist.example"])
-    assert agent["Disabled"] and not agent["RunAtLoad"] and not agent["KeepAlive"]
+    assert agent["Disabled"] and not agent["RunAtLoad"] and agent["KeepAlive"]
     assert agent["Umask"] == 0o077 and agent["LimitLoadToSessionType"] == "Aqua"
     # Allow the 120-second reading window, 60-second action budget and browser cleanup.
     assert agent["ExitTimeOut"] == 240

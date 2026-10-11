@@ -266,3 +266,54 @@ def test_notification_and_state_rollback_together(tmp_path):
         storage.record(outcome.record, replace(outcome.state, message="must-not-win"), changed)
     assert storage.get_notification(flame().id, flame().account_id) == original
     assert storage.get_state(flame().id, flame().account_id) == outcome.state
+
+
+def test_corrupt_state_json_skips_dispatch_without_killing_the_tick(tmp_path):
+    import sqlite3
+    import threading
+
+    runner, service, storage, keeper, clock, notifier = setup(
+        tmp_path, [KeepResult(KeepStatus.SUCCESS, "done")],
+    )
+    runner.run_flame(flame(), now=local(11, 9))
+    with sqlite3.connect(storage.path) as db:
+        db.execute(
+            "UPDATE flame_state SET metadata_json = ? WHERE flame_id = ? AND account_id = ?",
+            ("NOT-JSON{", flame().id, flame().account_id),
+        )
+    keeper.results.append(KeepResult(KeepStatus.SUCCESS, "should-not-run"))
+    clock.current = local(12, 9)
+    outcomes, next_due = service.run_due(now=local(12, 9))
+    assert outcomes == []
+    assert [event["event"] for event in notifier.events] == ["storage_corrupt"]
+    assert notifier.events[0]["result"].metadata["reason"] == "storage_corrupt"
+    # Same business day: alert is not repeated.
+    assert service.run_due(now=local(12, 10))[0] == []
+    assert len(notifier.events) == 1
+
+
+def test_run_forever_survives_corrupt_state_and_can_be_stopped(tmp_path):
+    import sqlite3
+    import threading
+
+    runner, service, storage, keeper, clock, notifier = setup(
+        tmp_path, [KeepResult(KeepStatus.SUCCESS, "done")],
+    )
+    runner.run_flame(flame(), now=local(11, 9))
+    with sqlite3.connect(storage.path) as db:
+        db.execute(
+            "UPDATE flame_state SET metadata_json = ? WHERE flame_id = ? AND account_id = ?",
+            ("NOT-JSON{", flame().id, flame().account_id),
+        )
+    stop = threading.Event()
+    service.stop_event = stop
+    clock.current = local(12, 9)
+
+    def halt_soon():
+        import time
+        time.sleep(0.2)
+        stop.set()
+
+    threading.Thread(target=halt_soon, daemon=True).start()
+    service.run_forever()  # must return after stop; must not raise
+    assert any(event["event"] == "storage_corrupt" for event in notifier.events)

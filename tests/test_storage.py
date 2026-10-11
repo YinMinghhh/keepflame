@@ -94,3 +94,48 @@ def test_multiple_accounts_remain_separate(tmp_path: Path) -> None:
     storage.record(run_b, state_b)
     assert len(storage.list_states()) == 2
 
+
+
+def test_corrupt_metadata_json_raises_storage_error(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "state.sqlite3")
+    now = datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
+    run, state = record_at("run-1", "healthy", now)
+    storage.record(run, state)
+    import sqlite3
+
+    with sqlite3.connect(storage.path) as db:
+        db.execute(
+            "UPDATE flame_state SET metadata_json = ? WHERE flame_id = ? AND account_id = ?",
+            ("NOT-JSON{", "joinquant-primary", "primary"),
+        )
+    with pytest.raises(StorageError, match="corrupt"):
+        storage.get_state("joinquant-primary", "primary")
+    with pytest.raises(StorageError, match="corrupt"):
+        storage.list_states()
+
+
+def test_corrupt_pending_notification_json_raises_storage_error(tmp_path: Path) -> None:
+    import sqlite3
+
+    from keepflame.core.models import PendingNotification
+
+    storage = SQLiteStorage(tmp_path / "state.sqlite3")
+    now = datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
+    run, state = record_at("run-1", "healthy", now)
+    notification = PendingNotification(
+        notification_id="n1",
+        flame_id=run.flame_id,
+        account_id=run.account_id,
+        event="flame_failed",
+        result=run.result,
+        occurred_at=now,
+        retry_at=now,
+    )
+    storage.record(run, state, notification)
+    with sqlite3.connect(storage.path) as db:
+        db.execute(
+            "UPDATE pending_notifications SET payload_json = ? WHERE flame_id = ? AND account_id = ?",
+            ("{bad", run.flame_id, run.account_id),
+        )
+    with pytest.raises(StorageError, match="corrupt"):
+        storage.get_notification(run.flame_id, run.account_id)

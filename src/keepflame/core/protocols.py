@@ -20,6 +20,10 @@ from keepflame.core.models import (
 T = TypeVar("T")
 
 
+class StorageError(RuntimeError):
+    """Raised when persistence cannot preserve lifecycle state safely."""
+
+
 class CapabilityResolver(Protocol):
     def require(self, name: str, expected_type: type[T] | None = None) -> T: ...
 

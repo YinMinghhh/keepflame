@@ -16,7 +16,7 @@
 	<key>ExitTimeOut</key>
 	<integer>240</integer>
 	<key>KeepAlive</key>
-	<false/>
+	<true/>
 	<key>Label</key>
 	<string>com.keepflame.runner</string>
 	<key>LimitLoadToSessionType</key>
