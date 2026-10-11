@@ -317,3 +317,60 @@ def test_run_forever_survives_corrupt_state_and_can_be_stopped(tmp_path):
     threading.Thread(target=halt_soon, daemon=True).start()
     service.run_forever()  # must return after stop; must not raise
     assert any(event["event"] == "storage_corrupt" for event in notifier.events)
+
+
+def test_business_day_without_success_alerts_once_after_reminder(tmp_path):
+    failure = KeepResult(KeepStatus.FAILED, "offline")
+    runner, service, storage, keeper, clock, notifier = setup(
+        tmp_path, [failure, failure, failure, failure, failure],
+    )
+    clock.current = local(11, 9)
+    assert len(service.run_due(now=local(11, 9))[0]) == 1
+    assert "business_day_no_success" not in [e["event"] for e in notifier.events]
+    # Before reminder: still no day-without-success alert.
+    clock.current = local(11, 19)
+    service.run_due(now=local(11, 19))
+    assert "business_day_no_success" not in [e["event"] for e in notifier.events]
+    # After reminder with no SUCCESS: one alert.
+    clock.current = local(11, 20)
+    service.run_due(now=local(11, 20))
+    assert [e["event"] for e in notifier.events].count("business_day_no_success") == 1
+    state = storage.get_state(flame().id, flame().account_id)
+    assert state.metadata.get("no_success_alert_day") == "2026-08-11"
+    # Same day: not repeated.
+    clock.current = local(11, 21)
+    service.run_due(now=local(11, 21))
+    assert [e["event"] for e in notifier.events].count("business_day_no_success") == 1
+
+
+def test_business_day_with_success_does_not_alert(tmp_path):
+    runner, service, storage, keeper, clock, notifier = setup(
+        tmp_path, [KeepResult(KeepStatus.SUCCESS, "done")],
+    )
+    clock.current = local(11, 9)
+    assert len(service.run_due(now=local(11, 9))[0]) == 1
+    clock.current = local(11, 20)
+    service.run_due(now=local(11, 20))
+    assert "business_day_no_success" not in [e["event"] for e in notifier.events]
+
+
+def test_business_day_without_success_can_alert_again_next_day(tmp_path):
+    runner, service, storage, keeper, clock, notifier = setup(
+        tmp_path,
+        [
+            KeepResult(KeepStatus.FAILED, "offline"),
+            KeepResult(KeepStatus.FAILED, "offline"),
+        ],
+    )
+    clock.current = local(11, 9)
+    service.run_due(now=local(11, 9))
+    clock.current = local(11, 20)
+    service.run_due(now=local(11, 20))
+    assert [e["event"] for e in notifier.events].count("business_day_no_success") == 1
+    # Next business day after reminder.
+    clock.current = local(12, 9)
+    service.run_due(now=local(12, 9))
+    clock.current = local(12, 20)
+    service.run_due(now=local(12, 20))
+    assert [e["event"] for e in notifier.events].count("business_day_no_success") == 2
+    assert storage.get_state(flame().id, flame().account_id).metadata.get("no_success_alert_day") == "2026-08-12"

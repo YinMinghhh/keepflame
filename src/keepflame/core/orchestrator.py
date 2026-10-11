@@ -211,6 +211,64 @@ class Orchestrator:
         self.storage.acknowledge_notification(pending)
         return None
 
+    def maybe_alert_day_without_success(self, flame: FlameConfig, *, now: datetime) -> None:
+        """Queue one business-day alert when reminder time passed with no SUCCESS."""
+        now = now.astimezone(timezone.utc)
+        zone = ZoneInfo(flame.schedule.timezone)
+        local_now = now.astimezone(zone)
+        if local_now.time() < flame.schedule.reminder_at:
+            return
+        target = BusinessTarget.at(now, flame.schedule.timezone)
+        previous = self.storage.get_state(flame.id, flame.account_id)
+        if self._success_on_target(previous, target):
+            return
+        if previous is not None and previous.metadata.get("no_success_alert_day") == target.day:
+            return
+        # WAITING_HUMAN already has human_action_required / reminder coverage.
+        if previous is not None and previous.status is KeepStatus.WAITING_HUMAN:
+            return
+        pending = self.storage.get_notification(flame.id, flame.account_id)
+        if pending is not None:
+            return
+        result = KeepResult(
+            status=KeepStatus.FAILED,
+            message="No SUCCESS recorded for this business day",
+            metadata={
+                "reason": "business_day_no_success",
+                "no_success_alert_day": target.day,
+                "business_target": target.to_dict(),
+            },
+            next_action_at=None if previous is None else previous.next_action_at,
+        )
+        notification = PendingNotification(
+            notification_id=str(uuid4()),
+            flame_id=flame.id,
+            account_id=flame.account_id,
+            event="business_day_no_success",
+            result=result,
+            occurred_at=now,
+            retry_at=now,
+            business_target=target,
+        )
+        queue = getattr(self.storage, "queue_ops_notification", None)
+        if not callable(queue):
+            return
+        queue(notification, metadata_updates={"no_success_alert_day": target.day})
+
+    @staticmethod
+    def _success_on_target(state: FlameState | None, target: BusinessTarget) -> bool:
+        if state is None:
+            return False
+        if state.last_success_receipt is not None and state.last_success_receipt.target == target:
+            return True
+        if (
+            state.status is KeepStatus.SUCCESS
+            and state.last_success_at is not None
+            and BusinessTarget.at(state.last_success_at, target.timezone) == target
+        ):
+            return True
+        return False
+
     @staticmethod
     def _transition(
         flame: FlameConfig,
@@ -247,6 +305,11 @@ class Orchestrator:
             action = result.human_action
             last_reminder = previous.last_reminder_at if same_action else None
 
+        metadata = dict(result.metadata)
+        if previous is not None:
+            stamped = previous.metadata.get("no_success_alert_day")
+            if isinstance(stamped, str) and stamped == target.day:
+                metadata.setdefault("no_success_alert_day", stamped)
         return FlameState(
             flame_id=flame.id,
             account_id=flame.account_id,
@@ -259,7 +322,7 @@ class Orchestrator:
             human_action=action,
             next_action_at=result.next_action_at,
             last_reminder_at=last_reminder,
-            metadata=dict(result.metadata),
+            metadata=metadata,
             last_checked_target=target,
             last_success_receipt=(result.receipt if result.status is KeepStatus.SUCCESS else
                                   None if previous is None else previous.last_success_receipt),
@@ -290,6 +353,8 @@ class Orchestrator:
             return None, False
 
         if result.status is KeepStatus.FAILED:
+            if result.metadata.get("reason") == "business_day_no_success":
+                return "business_day_no_success", False
             if (
                 previous is None
                 or previous.status is not KeepStatus.FAILED

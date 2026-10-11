@@ -4,7 +4,7 @@
 
 这里负责格式与投递，不重新判断 Keeper 的成功、失败或 `WAITING_HUMAN` 状态。常规成功应尽量汇总，避免产生通知噪声。
 
-生命周期投递始终写 stdout JSONL：首次人工操作、当日一次提醒、失败变化、已证明积分和恢复才投递；每次复检的完整结果由 storage 保留。`Notifier.notify` 接收稳定 `notification_id`。可选 SMTP 邮箱渠道在 JSONL 之外再发一封短讯，只在 `[notify.email] enabled = true` 时启用；省略或关闭时不打开套接字，也不读取密码文件。发布样例保持关闭，不包含真实邮箱或邮箱口令。口令只在发送时从绝对路径密钥文件读取，末尾单个换行会被去掉；口令不进入配置示例、日志、异常文本或邮件正文。进程事件仍只写 JSONL。
+生命周期投递始终写 stdout JSONL：首次人工操作、当日一次提醒、失败变化、已证明积分、恢复，以及提醒时刻后仍无 SUCCESS 的 `business_day_no_success`（每 Flame/账号/业务日一次）才投递；每次复检的完整结果由 storage 保留。`Notifier.notify` 接收稳定 `notification_id`。可选 SMTP 邮箱渠道在 JSONL 之外再发一封短讯，只在 `[notify.email] enabled = true` 时启用；省略或关闭时不打开套接字，也不读取密码文件。发布样例保持关闭，不包含真实邮箱或邮箱口令。口令只在发送时从绝对路径密钥文件读取，末尾单个换行会被去掉；口令不进入配置示例、日志、异常文本或邮件正文。进程事件仍只写 JSONL。
 
 可选 Slack 渠道（`slack.py`）同样在 JSONL 之外发一条短讯，只在 `[notify.slack] enabled = true` 时启用；省略或关闭时不联网，也不读取 Webhook 文件。它用标准库 urllib 向 Incoming Webhook POST `{"text": ...}`，不跟随重定向，超时取 `timeout_seconds`。消息只含 Flame、账号标识、事件类型、状态、一句话说明、下一步时间、人工动作的类型/摘要/说明和通知 ID；积分入账事件另带数量与项目。不含 metadata、URL、Cookie、token 或页面内容，并转义 Slack 的 `&`、`<`、`>`，单字段限长。Webhook 地址保存在仓库外的绝对路径文件，只在发送时读取，只接受 `https://hooks.slack.com/` 开头的地址；它不进配置对象、日志、异常、消息正文或 outbox，错误只记类型。
 

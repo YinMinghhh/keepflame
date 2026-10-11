@@ -112,6 +112,30 @@ class MemoryStorage:
             if notification.reminder_at is not None:
                 self.states[key] = replace(self.states[key], last_reminder_at=notification.reminder_at)
 
+    def queue_ops_notification(self, notification, *, metadata_updates=None):
+        key = (notification.flame_id, notification.account_id)
+        self.notifications[key] = notification
+        if metadata_updates:
+            if key in self.states:
+                state = self.states[key]
+                self.states[key] = replace(state, metadata={**state.metadata, **metadata_updates})
+            else:
+                from keepflame.core.models import FlameState, KeepStatus
+                self.states[key] = FlameState(
+                    flame_id=notification.flame_id,
+                    account_id=notification.account_id,
+                    status=notification.result.status,
+                    message=notification.result.message,
+                    last_checked_at=notification.occurred_at,
+                    last_success_at=None,
+                    consecutive_failures=0,
+                    pending_human_since=None,
+                    human_action=None,
+                    next_action_at=notification.result.next_action_at,
+                    last_reminder_at=None,
+                    metadata=dict(metadata_updates),
+                )
+
     def healthcheck(self) -> None:
         return None
 

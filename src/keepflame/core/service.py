@@ -65,6 +65,8 @@ class SchedulerService:
         next_due: datetime | None = None
         for flame in self.config.enabled_flames():
             try:
+                # Day-without-success alerts still run while paused; human reminders cover WAITING_HUMAN.
+                self.orchestrator.maybe_alert_day_without_success(flame, now=current)
                 notification_due = self.orchestrator.deliver_pending(flame, now=current)
                 if notification_due is not None and (next_due is None or notification_due < next_due):
                     next_due = notification_due

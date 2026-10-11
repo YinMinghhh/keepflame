@@ -421,6 +421,69 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
         except sqlite3.Error as exc:
             raise StorageError("failed to acknowledge notification") from exc
 
+    def queue_ops_notification(
+        self,
+        notification: PendingNotification,
+        *,
+        metadata_updates: dict | None = None,
+    ) -> None:
+        """Queue an ops alert without a Keeper run; merge metadata stamps onto state."""
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM pending_notifications WHERE flame_id = ? AND account_id = ?",
+                    (notification.flame_id, notification.account_id),
+                )
+                connection.execute(
+                    "INSERT INTO pending_notifications VALUES (?, ?, ?, ?)",
+                    (
+                        notification.flame_id,
+                        notification.account_id,
+                        notification.notification_id,
+                        _notification_json(notification),
+                    ),
+                )
+                if metadata_updates:
+                    row = connection.execute(
+                        "SELECT metadata_json FROM flame_state WHERE flame_id = ? AND account_id = ?",
+                        (notification.flame_id, notification.account_id),
+                    ).fetchone()
+                    if row is None:
+                        metadata = dict(metadata_updates)
+                        connection.execute(
+                            """
+                            INSERT INTO flame_state(
+                                flame_id, account_id, status, message, last_checked_at,
+                                last_success_at, consecutive_failures, pending_human_since,
+                                human_action_json, next_action_at, last_reminder_at,
+                                metadata_json, last_checked_target_json, last_success_receipt_json
+                            ) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, NULL, ?, NULL, NULL)
+                            """,
+                            (
+                                notification.flame_id,
+                                notification.account_id,
+                                notification.result.status.value,
+                                notification.result.message,
+                                _timestamp(notification.occurred_at),
+                                _json(metadata),
+                            ),
+                        )
+                    else:
+                        try:
+                            metadata = _loads(row["metadata_json"], what="Flame metadata")
+                        except StorageError:
+                            metadata = {}
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                        metadata.update(metadata_updates)
+                        connection.execute(
+                            "UPDATE flame_state SET metadata_json = ? WHERE flame_id = ? AND account_id = ?",
+                            (_json(metadata), notification.flame_id, notification.account_id),
+                        )
+        except sqlite3.Error as exc:
+            raise StorageError("failed to queue ops notification") from exc
+
     @contextmanager
     def execution_lock(self):
         """One runner per database; status and health remain available."""
