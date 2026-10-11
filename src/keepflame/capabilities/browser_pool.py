@@ -21,6 +21,7 @@ class _Context:
     login_page: object | None = None
     login_handler: object | None = None
     permit_page: object | None = None
+    proof_url: str | None = None
 
 
 class BrowserPool:
@@ -33,12 +34,13 @@ class BrowserPool:
         self._thread = get_ident()
         self._closed = False
         self.close_reason = None
+        self.launch_count = 0
 
     @property
     def closed(self):
         return self._closed
 
-    def _get(self, profile_dir, account_id, origin):
+    def _get(self, profile_dir, account_id, origin, *, visible=False):
         if self._closed or get_ident() != self._thread:
             raise BrowserUnavailable("browser pool is closed or used from another thread")
         identity = (profile_dir, account_id, origin)
@@ -53,8 +55,11 @@ class BrowserPool:
         if len(self._contexts) >= self.max_accounts:
             raise BrowserUnavailable("browser account limit reached")
         try:
+            # A visible request wins over a headless pool. JoinQuant asks for that.
+            launch_headless = False if visible else self.headless
             owned = self._stack.enter_context(self.browser.session(
-                profile_dir=profile_dir, account_id=account_id, origin=origin, headless=self.headless))
+                profile_dir=profile_dir, account_id=account_id, origin=origin, headless=launch_headless))
+            self.launch_count += 1
         except Exception as exc:
             if isinstance(exc, BrowserRestoreFailed) or getattr(self.browser, 'restore_session', False):
                 self.close(reason="restore_startup_failed")
@@ -84,9 +89,13 @@ class BrowserPool:
             raise BrowserUnavailable("browser startup cleanup failed") from None
         return slot
 
+    def open_visible(self, *, profile_dir, account_id, origin):
+        """Open the dedicated window once. Later task pages reuse this context."""
+        self._get(profile_dir, account_id, origin, visible=True)
+
     @contextmanager
     def open(self, *, profile_dir, account_id, origin, headless=True):
-        slot = self._get(profile_dir, account_id, origin)
+        slot = self._get(profile_dir, account_id, origin, visible=headless is False)
         if slot.busy or slot.login_page is not None:
             raise BrowserUnavailable("browser account is busy")
         slot.busy = True
@@ -119,7 +128,16 @@ class BrowserPool:
             raise BrowserUnavailable("browser account is busy")
 
         def guard(route):
-            if any(urlsplit(route.request.url).path.startswith(path) for path in blocked_paths):
+            target = urlsplit(route.request.url)
+            proof = slot.proof_url
+            method = getattr(route.request, "method", "")
+            # One exact task-info GET proves the session. Reward routes stay blocked.
+            if (isinstance(proof, str) and method == "GET" and route.request.url == proof
+                    and not target.query and not target.fragment
+                    and not getattr(route.request, "post_data", None)):
+                route.fallback()
+                return
+            if any(target.path.startswith(path) for path in blocked_paths):
                 route.abort('blockedbyclient')
             else:
                 route.fallback()
@@ -140,6 +158,49 @@ class BrowserPool:
         if slot.login_page is None or slot.login_page.is_closed():
             raise BrowserUnavailable("login window was closed")
         slot.login_page.wait_for_timeout(1)
+
+    def login_window_open(self, profile_dir):
+        slot = self._contexts.get(profile_dir)
+        if slot is None or slot.login_page is None:
+            return False
+        try:
+            return not slot.login_page.is_closed()
+        except Exception:
+            return False
+
+    def read_login_proof(self, profile_dir, url):
+        """Read one task-info response from the open login window.
+
+        A test double may supply context.proof_body. The live window uses the
+        page's own fetch so the session cookie stays inside that profile.
+        """
+        if not self.login_window_open(profile_dir):
+            raise BrowserUnavailable("login window was closed")
+        slot = self._contexts[profile_dir]
+        provider = getattr(slot.context, "proof_body", None)
+        if callable(provider):
+            return provider(url)
+        slot.proof_url = url
+        try:
+            raw = slot.login_page.evaluate(
+                """async (url) => {
+                    const response = await fetch(url, {
+                        credentials: 'include',
+                        headers: {'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}
+                    });
+                    const text = await response.text();
+                    return {status: response.status, body: text.slice(0, 1048576)};
+                }""",
+                url,
+            )
+        finally:
+            slot.proof_url = None
+        if not isinstance(raw, dict):
+            return None
+        status, body = raw.get("status"), raw.get("body")
+        if type(status) is not int or not isinstance(body, str):
+            return None
+        return status, body.encode("utf-8")
 
     def end_login(self, profile_dir):
         slot = self._contexts.get(profile_dir)

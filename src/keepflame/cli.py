@@ -303,13 +303,19 @@ def _control(runtime, args):
             raise ConfigError("login requires a configured dedicated browser_profile_dir")
         identifier = runtime.storage.request_login(flame.keeper, flame.account_id, flame.id, now)
         print(json.dumps({"event": "login_requested", "request_id": identifier,
-                          "message": "The executing daemon must consume this request within 15 minutes; check status for waiting."}))
+                          "message": "The login window stays open after 15 minutes. A saved session continues today's tasks without a separate confirm."}))
     return 0
+
+
+def _owner_line(event: str, **fields) -> None:
+    print(json.dumps({"event": event, **fields}, sort_keys=True, separators=(",", ":")))
+    sys.stdout.flush()
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     runtime = None
+    profile_owner = None
     try:
         if args.command == 'run-once':
             if args.via_daemon and (not args.flame or not args.request_id):
@@ -377,9 +383,32 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"event": "configuration_reload_requested", "request_id": identifier,
                               "message": "Check runtime_commands for completion; the database path must remain unchanged."}))
             return 0
+        profile_targets = []
+        if args.command == "run" and args.execute:
+            from keepflame.capabilities.profile_owner import ProfileInUse, ProfileOwner, browser_profiles
+            profile_targets = browser_profiles(load_config(args.config), EntryPointKeeperRegistry())
+            if profile_targets:
+                profile_owner = ProfileOwner()
+                try:
+                    profile_owner.acquire(profile_targets)
+                except ProfileInUse:
+                    _owner_line("owner_refused", browser_launches=0, profile_in_use=True)
+                    return 1
         runtime = (build_runtime(args.config, restore_browser_session=True)
                    if args.command == 'run' and args.restore_browser_session else build_runtime(args.config))
         if args.command == 'run':
+            if profile_owner is not None:
+                from keepflame.capabilities.profile_owner import prepare_visible_owner
+                launches = prepare_visible_owner(runtime, profile_targets)
+                headless_flags = [
+                    flame.settings.get("browser_headless") is True
+                    for flame in runtime.config.enabled_flames()
+                ]
+                _owner_line(
+                    "visible_owner", browser="visible", browser_window="visible",
+                    browser_headless=bool(headless_flags) and all(headless_flags),
+                    browser_launches=launches, second_browser=False,
+                )
             with runtime.daemon_session():
                 return _run_daemon(runtime)
         if args.command == 'run-once':
@@ -399,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if runtime is not None:
             runtime.close()
+        if profile_owner is not None:
+            profile_owner.release()
 
 
 if __name__ == "__main__":

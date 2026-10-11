@@ -8,11 +8,13 @@
 
 `browser.py` 管理 KeepFlame 自己的 Chrome 持久会话。只有仓库外、当前用户专属且显式登记账号的目录可用，不扫描端口或连接已有浏览器。依赖在使用时才加载；默认安装及 `health` 不启动 Chrome。能力层负责会话关闭、请求域名限制和浏览器安全选项，不包含聚宽选择器或签到判断。
 
-profile 登记还检查父目录可控、内部数据链接和所有权；扫描仅用文件元数据，不读浏览器数据内容。Chrome 根目录的 SingletonLock/SingletonSocket/SingletonCookie 链接不视为数据逃逸。聚宽请求预算留在聚宽插件的 guard.py，不扩展通用 browser capability 为站点防火墙。
+profile 登记还检查父目录可控、内部数据链接和所有权；扫描仅用文件元数据，不读浏览器数据内容。Chrome 根目录的 SingletonLock/SingletonSocket/SingletonCookie，以及只含版本号的 RunningChromeVersion 链接不视为数据逃逸。聚宽请求预算留在聚宽插件的 guard.py，不扩展通用 browser capability 为站点防火墙。
 
-持久目录不保证没有有效期的会话 Cookie 在 Chrome 退出后保留。接入程序可在 `IsolatedBrowser.session(...)` 内让用户自行登录，然后把返回的 `OwnedBrowserSession` 传给 `build_runtime(..., browser=session)`，在同一个仍存活的浏览器中执行一次 Keeper。该句柄只允许原 profile、account_id、origin 使用一次；失败也消耗这次使用，退出外层上下文后失效并关闭浏览器。它保留登录窗口原来的显示模式，不重开浏览器、不扫描现有窗口或导出 Cookie。普通 `open()` 仍提供单次上下文；CLI 的常驻行为见下文。
+持久目录本身不保留没有有效期的会话 Cookie。`IsolatedBrowser.session(...)` 只把本次响应里的 HttpOnly、且没有 Expires 和 Max-Age 的 Cookie 记在该 profile 内，并补上有限有效期，供同一 profile、同一 origin 的下一个浏览器进程在同源请求中送出。已有有效期的 Cookie 仍交给浏览器保存。这份记录不写出 profile、不进日志、不进入其他账号的 profile，也不调用 Cookie 导出接口。服务器拒绝登录时结果仍是等待人工，本地记录不是登录成功。接入程序可在该 session 内让用户自行登录，然后把返回的 `OwnedBrowserSession` 传给 `build_runtime(..., browser=session)`，在同一个仍存活的浏览器中执行一次 Keeper。该句柄只允许原 profile、account_id、origin 使用一次；失败也消耗这次使用，退出外层上下文后失效并关闭浏览器。它保留登录窗口原来的显示模式，不重开浏览器、不扫描现有窗口或导出 Cookie。普通 `open()` 仍提供单次上下文；CLI 的常驻行为见下文。
 
-CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一上下文，检查 profile/account/origin 绑定，每轮关闭全部任务页，仅进程关闭时退出 Chrome。登录窗口与任务页串行；账号忙碌时拒绝借用。默认 GUI 模式供未来官方人工登录，测试可显式 headless。账号上限8，不自动重开失效上下文；单次 OwnedBrowserSession 接口仍供受控集成使用。
+CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一上下文，检查 profile/account/origin 绑定，每轮关闭全部任务页，仅进程关闭时退出 Chrome。登录窗口与任务页串行；账号忙碌时拒绝借用。默认 GUI 模式供未来官方人工登录，测试可显式 headless。`open(headless=False)` 即使池按 headless 构造也会可见启动；省略该参数时仍沿用构造时的 headless。账号上限8，不自动重开失效上下文；单次 OwnedBrowserSession 接口仍供受控集成使用。
+
+`keepflame run --execute` 对每个已启用浏览器 profile 持有一把独占锁，并先打开一个可见窗口。签到和阅读共用一个 profile 时只启动一个窗口，人工登录和两件每日任务都在这个窗口里进行。第二个启动在校验 profile 内容和启动 Chrome 之前退出。锁在本进程关闭浏览器之后才释放。
 
 服务器首次登记专用目录时（仅在另行获准后），目录必须是当前运行用户拥有的绝对路径、0700，父目录不可组/其他用户写，且位于任何Git仓库之外。新空目录内创建0600的 `.keepflame-profile.json`，内容严格为 `{"version":1,"account_id":"primary","purpose":"keepflame"}`，account_id须与配置一致。不要重用日常Chrome目录或修改已有profile归属。该标记只登记目录身份，不含凭据也不证明已登录；随后再用正式login控制流。
 
@@ -27,7 +29,7 @@ CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一�
 API 等价入口为 `build_runtime(..., restore_browser_session=True)`，不可同时传入借用的 browser。
 
 恢复保留同一 profile 和 Playwright 原有加密参数，不读取/导出 Cookie 或 storage_state，
-不更改有效期、系统钥匙串项或系统网络设置。启动前先占用一个不监听的本机 TCP 端口，
+不改系统钥匙串项或系统网络设置。没有有效期的 HttpOnly 会话 Cookie 只在该 profile 内补上有限有效期；已经带有效期的 Cookie 不改写。启动前先占用一个不监听的本机 TCP 端口，
 Chrome 唯一代理指向此端口并禁用 loopback 绕过、直接 DNS、QUIC 和非代理 WebRTC UDP；
 屏障持续到浏览器关闭。仅安装 launch 后的 route 不构成启动屏障。
 

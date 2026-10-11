@@ -121,10 +121,33 @@ class JoinQuantKeeper:
     review_abandonment = staticmethod(review_abandonment)
     browser_origin = JOINQUANT_ORIGIN
     login_url = JOINQUANT_ORIGIN + "/user/login/index"
-    login_blocked_paths = ("/credits/", "/common/verifyCode/", "/user/account/getToken", "/community/post/postView")
+    login_proof_url = TASK_INFO_URL
+    # Login captcha and SMS live under /common/verifyCode/ and must reach the human.
+    # Reward claim, signing token, and reading registration stay blocked in that window.
+    login_blocked_paths = ("/credits/", "/user/account/getToken", "/community/post/postView")
 
     def __init__(self, sleeper: Callable[[float], None] = time.sleep) -> None:
         self._sleep = sleeper
+
+    @staticmethod
+    def login_proven(status, body):
+        """True when getTaskInfo code is 00000. False when the session is logged out.
+
+        A logged-in account can still have today's task incomplete. Code 00000 is
+        the session proof. Code 10001 stays a human wait, not a completed login.
+        """
+        if status != 200 or not isinstance(body, (bytes, bytearray)):
+            return None
+        result = JoinQuantKeeper._interpret(
+            HttpResponse(status=200, url=TASK_INFO_URL, headers={}, body=bytes(body)),
+            now=datetime.now(timezone.utc),
+        )
+        code = result.metadata.get("remote_code")
+        if code == "00000":
+            return True
+        if code == "10001" or result.status is KeepStatus.WAITING_HUMAN:
+            return False
+        return None
 
     def keep(self, context: KeeperContext) -> KeepResult:
         task = context.settings.get("task", "checkin")

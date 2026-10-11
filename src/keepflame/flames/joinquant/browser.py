@@ -404,8 +404,9 @@ class JoinQuantBrowserKeeper:
         progress = {"reserved": False, "action_stage": "inspect"}
         try:
             browser = context.capabilities.require("browser")
+            # The dedicated window stays visible. browser_headless cannot hide it.
             with browser.open(profile_dir=profile, account_id=context.account_id,
-                              origin=JOINQUANT_ORIGIN, headless=headless) as page:
+                              origin=JOINQUANT_ORIGIN, headless=False) as page:
                 fence.check()
                 options = {"deadline": deadline, "date_fence": fence}
                 if task.name == "reading":
@@ -444,7 +445,8 @@ class JoinQuantBrowserKeeper:
             result = replace(completed, metadata={**completed.metadata,
                 "automation_paused": True, "reason": "browser_cleanup_failed",
                 "cleanup_reason": result.metadata.get("reason", "browser_operation_failed")})
-        metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"]}
+        metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"],
+                    "browser_window": "visible"}
         if progress["reserved"] and result.status is not KeepStatus.SUCCESS:
             metadata["automation_paused"] = True
         if gateway is not None and hasattr(gateway, "guard"):

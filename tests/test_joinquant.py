@@ -14,6 +14,23 @@ from tests.helpers import FakeHttpClient, MemoryStorage, StaticSecrets, response
 COOKIE = "sid=test-session; other=value"
 
 
+def test_login_window_allows_official_captcha_and_blocks_reward_submission():
+    blocked = JoinQuantKeeper.login_blocked_paths
+
+    def blocked_for(path: str) -> bool:
+        return any(path.startswith(prefix) for prefix in blocked)
+
+    assert not blocked_for("/user/login/doLoginByText")
+    assert not blocked_for("/user/login/doLoginByCode")
+    assert not blocked_for("/common/verifyCode/captchar")
+    assert not blocked_for("/common/verifyCode/validate")
+    assert not blocked_for("/common/verifyCode/valideCode")
+    assert not blocked_for("/common/verifyCode/sendSMS")
+    assert blocked_for("/credits/task/receiveCredits")
+    assert blocked_for("/user/account/getToken")
+    assert blocked_for("/community/post/postView")
+
+
 def run_keeper(http: FakeHttpClient, secret=COOKIE):
     keeper = JoinQuantKeeper(sleeper=lambda _seconds: None)
     context = KeeperContext(

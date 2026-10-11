@@ -62,7 +62,7 @@ class Keeper:
 
 runtime_module.SystemClock = Clock
 runtime_module.EntryPointKeeperRegistry = lambda: SimpleNamespace(resolve=lambda _: Keeper())
-runtime_module.BrowserPool = lambda: SimpleNamespace(close=lambda: None)
+runtime_module.BrowserPool = lambda: SimpleNamespace(close=lambda **_kwargs: None)
 cli.datetime = CommandClock
 
 if mode == 'crash_daemon':

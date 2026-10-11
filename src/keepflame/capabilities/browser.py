@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,6 +21,14 @@ class BrowserRestoreFailed(BrowserUnavailable):
 
 class ProfileNotAuthorized(BrowserUnavailable):
     pass
+
+
+def _allowed_chrome_marker(name: str, target: str) -> bool:
+    """Chrome root markers are not followed. The version marker must not be a path."""
+    if name in {"SingletonLock", "SingletonSocket", "SingletonCookie"}:
+        return True
+    # Current Chrome records its version as a non-path symlink after launch.
+    return name == "RunningChromeVersion" and bool(re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", target))
 
 
 def validate_profile(reference: str, account_id: str) -> Path:
@@ -55,7 +64,7 @@ def validate_profile(reference: str, account_id: str) -> Path:
                 if inspected > 50_000:
                     raise ProfileNotAuthorized("browser profile metadata limit")
                 if entry.is_symlink():
-                    if directory == path and entry.name in {"SingletonLock", "SingletonSocket", "SingletonCookie"}:
+                    if directory == path and _allowed_chrome_marker(entry.name, os.readlink(entry.path)):
                         continue
                     raise ProfileNotAuthorized("browser data must not contain symbolic links")
                 metadata = entry.stat(follow_symlinks=False)
@@ -120,11 +129,13 @@ class IsolatedBrowser:
     def session(self, *, profile_dir: str, account_id: str, origin: str, headless: bool = True):
         """Keep an owned browser open across human login and one Keeper run.
 
-        A user data directory preserves persistent cookies, but not necessarily
-        session cookies after Chrome exits. Pass this handle as the runtime's
-        browser capability while still inside this context; never export cookies.
+        A user data directory preserves persistent cookies. An httpOnly cookie
+        with no expiry is retained inside this same profile so a later process
+        can send it; the value is never exported or logged. Pass this handle as
+        the runtime's browser capability while still inside this context.
         """
         profile = validate_profile(profile_dir, account_id)
+        from keepflame.capabilities.session_cookie import apply_retained_cookies, retain_response_cookies
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -164,6 +175,12 @@ class IsolatedBrowser:
                     if 300 <= response.status < 400:
                         route.abort("blockedbyclient")
                     else:
+                        # Chrome forgets a no-expiry cookie at process exit.
+                        # Keep it in this profile only; do not export the value.
+                        retain_response_cookies(
+                            profile, response, request_url=route.request.url,
+                            account_id=account_id, origin=origin,
+                        )
                         route.fulfill(response=response)
                 except Exception:
                     route.abort("blockedbyclient")
@@ -197,6 +214,7 @@ class IsolatedBrowser:
                         args=["--disable-background-networking", "--disable-component-update", *restore_args],
                     )
                     context.set_default_timeout(5_000)
+                    apply_retained_cookies(context, profile, account_id=account_id, origin=origin)
                     if self.restore_session:
                         def deny_startup(route):
                             route.abort("blockedbyclient")

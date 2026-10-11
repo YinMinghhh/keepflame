@@ -127,6 +127,13 @@ class ControlStorageMixin:
             connection.execute("DELETE FROM runtime_pauses WHERE keeper=? AND account_id=? AND scope=?",
                                (keeper, account_id, scope))
 
+    def pause_reason(self, keeper, account_id, scope):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT reason FROM runtime_pauses WHERE keeper=? AND account_id=? AND scope=?",
+                (keeper, account_id, scope)).fetchone()
+        return None if row is None else row["reason"]
+
     def request_login(self, keeper, account_id, flame_id, now):
         identifier = str(uuid4())
         with self._connect() as connection:

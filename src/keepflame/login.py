@@ -1,9 +1,13 @@
 """Local operator handoff consumed only by the running daemon.
 
-The plugin supplies login URLs and excluded task routes. Confirming login does
-not assert authentication; the next Keeper inspection must verify it remotely.
+The plugin supplies login URLs, the task-info proof, and excluded task routes.
+A saved session is GET task-info code 00000 while the login window is open.
+The 15-minute request does not close that window.
 """
 from datetime import datetime, timezone
+
+
+_LOGIN_PAUSE_REASONS = frozenset({"login_requested", "login_required"})
 
 
 class LoginCoordinator:
@@ -28,7 +32,11 @@ class LoginCoordinator:
             flame = next((f for f in self.config.flames if f.id == request['flame_id']
                           and f.keeper == request['keeper'] and f.account_id == request['account_id']), None)
             profile = self.active.get(identifier)
-            if datetime.fromisoformat(request['expires_at']) <= now or flame is None:
+            expired = datetime.fromisoformat(request['expires_at']) <= now
+            window_open = self._window_open(profile)
+            # A closed window can expire. An open one stays up so the user can
+            # still log in, and task-info proof clears the login pause.
+            if flame is None or (expired and not window_open):
                 self._finish(request, 'expired', profile)
                 continue
             if state == 'requested':
@@ -58,14 +66,66 @@ class LoginCoordinator:
                     self.browser.pump_login(profile)
                 except Exception:
                     self._finish(request, 'failed', profile)
+                    continue
+                self._accept_if_proven(request, flame, profile, now)
             elif state in ('confirmed', 'cancelled'):
                 valid_confirmation = state == 'confirmed' and profile is not None
                 self._finish(request, 'completed' if valid_confirmation else 'closed', profile)
                 if valid_confirmation:
-                    self.storage.resume(flame.keeper, flame.account_id, '*')
-                    for target in self.config.flames:
-                        if (target.keeper, target.account_id) == (flame.keeper, flame.account_id):
-                            self.storage.request_inspection(target.id, target.account_id, now)
+                    self._clear_login_pause(flame)
+                    self._due_account(flame, now)
+
+    def _window_open(self, profile):
+        if profile is None:
+            return False
+        checker = getattr(self.browser, "login_window_open", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(profile))
+        except Exception:
+            return False
+
+    def _accept_if_proven(self, request, flame, profile, now):
+        if self._login_proven(flame, profile) is not True:
+            return False
+        self._clear_login_pause(flame)
+        self._due_account(flame, now)
+        self._finish(request, 'completed', profile)
+        return True
+
+    def _login_proven(self, flame, profile):
+        try:
+            keeper = self.registry.resolve(flame.keeper)
+        except Exception:
+            return None
+        url = getattr(keeper, "login_proof_url", None)
+        interpret = getattr(keeper, "login_proven", None)
+        reader = getattr(self.browser, "read_login_proof", None)
+        if not isinstance(url, str) or not callable(interpret) or not callable(reader):
+            return None
+        try:
+            read = reader(profile, url)
+        except Exception:
+            return None
+        if not isinstance(read, tuple) or len(read) != 2:
+            return None
+        try:
+            return interpret(read[0], read[1])
+        except Exception:
+            return None
+
+    def _clear_login_pause(self, flame):
+        reason = getattr(self.storage, "pause_reason", None)
+        if not callable(reason):
+            return
+        if reason(flame.keeper, flame.account_id, "*") in _LOGIN_PAUSE_REASONS:
+            self.storage.resume(flame.keeper, flame.account_id, "*")
+
+    def _due_account(self, flame, now):
+        for target in self.config.enabled_flames():
+            if (target.keeper, target.account_id) == (flame.keeper, flame.account_id):
+                self.storage.request_inspection(target.id, target.account_id, now)
 
     def _finish(self, request, state, profile):
         if profile is not None:

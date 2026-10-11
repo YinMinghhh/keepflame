@@ -113,6 +113,101 @@ class Browser:
 OPTIONS = dict(profile_dir='/synthetic/profile', account_id='synthetic', origin='https://fixture.invalid')
 
 
+def test_visible_request_overrides_headless_pool():
+    class RecordingBrowser:
+        def __init__(self):
+            self.launches = []
+
+        @contextmanager
+        def session(self, **kwargs):
+            self.launches.append(kwargs['headless'])
+            context = Context()
+            try:
+                yield SimpleNamespace(page=context.new_page())
+            finally:
+                context.closed = True
+
+    browser = RecordingBrowser()
+    pool = BrowserPool(browser, headless=True)
+    with pool.open(**OPTIONS, headless=False):
+        pass
+    assert browser.launches == [False] and pool.launch_count == 1
+    with pool.open(**OPTIONS):
+        pass
+    assert pool.launch_count == 1 and browser.launches == [False]
+    other = RecordingBrowser()
+    default_pool = BrowserPool(other, headless=True)
+    with default_pool.open(**OPTIONS):
+        pass
+    assert other.launches == [True] and default_pool.launch_count == 1
+    print('observation pool_open_headless_false_launches_visible=true')
+    print('observation pool_default_open_uses_constructor_headless=true')
+
+
+def test_one_owner_serves_both_tasks_and_second_start_does_not_launch(tmp_path):
+    from keepflame.capabilities.profile_owner import ProfileInUse, ProfileOwner, browser_profiles, prepare_visible_owner
+    from keepflame.core.plugins import EntryPointKeeperRegistry
+
+    home = tmp_path / 'home'
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+    profile = (home / 'profile').resolve()
+    profile.mkdir(mode=0o700)
+    profile.chmod(0o700)
+    marker = profile / '.keepflame-profile.json'
+    marker.write_text(json.dumps({'version': 1, 'account_id': 'primary', 'purpose': 'keepflame'}))
+    marker.chmod(0o600)
+    second = '''
+[[flames]]
+id = "joinquant-reading-primary"
+keeper = "joinquant"
+account_id = "primary"
+enabled = true
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+first_check = "09:00"
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+mode = "browser"
+task = "reading"
+browser_profile_dir = "%s"
+browser_headless = true
+article_url = "https://www.joinquant.com/view/community/detail/34862"
+''' % profile
+    checkin = BASE_CONFIG.replace('path = "state/keepflame.sqlite3"', 'path = "owner.sqlite3"').replace(
+        'cookie_file = "/run/secrets/joinquant.cookie"',
+        'mode = "browser"\ntask = "checkin"\nbrowser_profile_dir = "%s"\nbrowser_headless = true' % profile,
+    )
+    config = load_config(write_config(tmp_path, checkin + second))
+    profiles = browser_profiles(config, EntryPointKeeperRegistry())
+    assert profiles == [(str(profile), 'primary', 'https://www.joinquant.com')]
+    launches = []
+
+    class Pool:
+        def __init__(self):
+            self.launch_count = 0
+
+        def open_visible(self, **kwargs):
+            launches.append(kwargs)
+            self.launch_count += 1
+
+    owner = ProfileOwner()
+    owner.acquire(profiles)
+    runtime = SimpleNamespace(owned_browser=Pool())
+    assert prepare_visible_owner(runtime, profiles) == 1
+    assert len(launches) == 1 and runtime.owned_browser.launch_count == 1
+    with pytest.raises(ProfileInUse):
+        ProfileOwner().acquire(profiles)
+    assert len(launches) == 1
+    owner.release()
+    print('observation one_visible_owner_for_checkin_and_reading=true')
+    print('observation second_start_refused_without_launch=true')
+
+
 def test_pool_keeps_context_but_closes_each_task_and_cannot_cross_accounts():
     browser = Browser(); pool = BrowserPool(browser)
     with pool.open(**OPTIONS) as first:
@@ -178,9 +273,91 @@ def test_incomplete_login_stays_paused_without_reopening(tmp_path, outcome):
         pool.close()
         controller = LoginCoordinator(controller.config, store, controller.registry, BrowserPool(Browser()), clock=clock)
     controller.tick()
-    assert store.login_requests() == []
+    if outcome == 'expire':
+        assert store.login_requests()[0]['state'] == 'waiting'
+        assert browser.launches[0].pages
+    else:
+        assert store.login_requests() == []
     assert store.is_paused(flame.keeper, flame.account_id, flame.id)
     assert len(browser.launches) == 1
+    pool.close()
+
+
+def _seed_waiting(store, flame, when, next_action):
+    from keepflame.core.models import BusinessTarget, FlameState, KeepResult, KeepStatus, RunRecord
+    target = BusinessTarget.at(when, "Asia/Shanghai")
+    result = KeepResult(KeepStatus.WAITING_HUMAN, "JoinQuant login session has expired",
+                        human_action=HumanAction("REFRESH_SESSION", "登录", "在独立窗口登录"),
+                        next_action_at=next_action)
+    state = FlameState(flame.id, flame.account_id, KeepStatus.WAITING_HUMAN, result.message,
+                       when, None, 0, when, result.human_action, next_action, None, {}, target, None)
+    store.record(RunRecord("seed-" + flame.id, flame.id, flame.account_id, when, when, result, target), state)
+
+
+def test_proven_login_clears_only_the_login_pause_and_dues_flames_now(tmp_path):
+    from keepflame.capabilities.http import HttpResponse
+    from keepflame.flames.joinquant.keeper import TASK_INFO_URL, JoinQuantKeeper
+    controller, store, pool, browser, flame, clock = login_coordinator(tmp_path)
+    reading = replace(flame, id="joinquant-reading-primary")
+    other = replace(flame, id="other-account", account_id="other")
+    disabled = replace(reading, id="disabled-reading", enabled=False)
+    controller.config = replace(controller.config, flames=(flame, reading, other, disabled))
+    controller.registry = StaticRegistry(JoinQuantKeeper())
+    later = NOW + timedelta(days=1)
+    _seed_waiting(store, flame, NOW, later)
+    _seed_waiting(store, reading, NOW, later)
+    store.pause(flame.keeper, flame.account_id, reading.id, "claim_unconfirmed", NOW)
+    store.request_login(flame.keeper, flame.account_id, flame.id, NOW)
+    controller.tick()
+    context = browser.launches[0]
+    assert store.login_requests()[0]["state"] == "waiting"
+    login_page = pool._contexts[OPTIONS["profile_dir"]].login_page
+    assert login_page is not None and not login_page.is_closed() and login_page in context.pages
+    clock.current += timedelta(minutes=16)
+    controller.tick()
+    assert store.login_requests()[0]["state"] == "waiting"
+    assert login_page in context.pages and not login_page.is_closed()
+    assert store.pause_reason(flame.keeper, flame.account_id, "*") == "login_requested"
+    logged_out = JoinQuantKeeper._interpret(
+        HttpResponse(200, TASK_INFO_URL, {}, b'{"code":"10001","msg":"login"}'), now=clock.current)
+    assert logged_out.status is KeepStatus.WAITING_HUMAN
+    assert JoinQuantKeeper.login_proven(200, b'{"code":"10001","msg":"login"}') is False
+    context.proof_body = lambda _url: (200, b'{"code":"10001","msg":"login"}')
+    controller.tick()
+    assert login_page in context.pages and not login_page.is_closed()
+    assert store.pause_reason(flame.keeper, flame.account_id, "*") == "login_requested"
+    assert store.get_state(flame.id, flame.account_id).next_action_at == later
+    context.proof_body = lambda _url: (200, b'{"code":"00000","data":{"taskList":{"login":{"status":0}}}}')
+    controller.tick()
+    proven_at = clock.current.astimezone(timezone.utc)
+    assert store.pause_reason(flame.keeper, flame.account_id, "*") is None
+    assert store.pause_reason(flame.keeper, flame.account_id, reading.id) == "claim_unconfirmed"
+    assert store.is_paused(flame.keeper, flame.account_id, reading.id)
+    assert not store.is_paused(flame.keeper, flame.account_id, flame.id)
+    assert store.get_state(flame.id, flame.account_id).next_action_at == proven_at
+    assert store.get_state(reading.id, reading.account_id).next_action_at == proven_at
+    assert store.get_state(other.id, other.account_id) is None
+    assert store.get_state(disabled.id, disabled.account_id) is None
+    assert store.login_requests() == []
+    print("observation login_proof_clears_only_login_pause=true")
+    print("observation login_expiry_keeps_window_open=true")
+    print("observation logged_out_stays_WAITING_HUMAN=true")
+    print("observation unconfirmed_claim_pause_remains=true")
+    pool.close()
+
+
+def test_login_proof_does_not_clear_a_claim_account_pause(tmp_path):
+    from keepflame.flames.joinquant.keeper import JoinQuantKeeper
+    controller, store, pool, browser, flame, _clock = login_coordinator(tmp_path)
+    controller.registry = StaticRegistry(JoinQuantKeeper())
+    store.request_login(flame.keeper, flame.account_id, flame.id, NOW)
+    controller.tick()
+    store.pause(flame.keeper, flame.account_id, "*", "claim_unconfirmed", NOW)
+    browser.launches[0].proof_body = lambda _url: (
+        200, b'{"code":"00000","data":{"taskList":{"login":{"status":1}}}}')
+    controller.tick()
+    assert store.pause_reason(flame.keeper, flame.account_id, "*") == "claim_unconfirmed"
+    assert store.is_paused(flame.keeper, flame.account_id, flame.id)
     pool.close()
 
 
