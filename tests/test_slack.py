@@ -23,7 +23,7 @@ from keepflame.notifier.lifecycle import ConfigView, LifecycleNotifier
 from keepflame.notifier.slack import SlackDeliveryError, deliver, post_webhook, validated_webhook
 from keepflame.runtime import build_runtime
 from keepflame.storage import SQLiteStorage
-from tests.helpers import FixedClock, SequenceKeeper, StaticRegistry, StaticSecrets
+from tests.helpers import FixedClock, SequenceKeeper, StaticRegistry, StaticSecrets, write_secret
 from tests.test_email import PASSWORD, RecordingSMTP
 from tests.test_orchestrator import local
 
@@ -104,8 +104,8 @@ def _write(tmp_path: Path, name: str, *, slack: bool | None, mail: bool | None =
     if hook_file is None:
         hook_file = tmp_path / f"{name}.webhook"
         if hook is not None:
-            hook_file.write_text(hook + "\n")
-    (tmp_path / "mail.smtp").write_text(PASSWORD + "\n")
+            write_secret(hook_file, hook + "\n")
+    write_secret(tmp_path / "mail.smtp", PASSWORD + "\n")
     path = tmp_path / f"{name}.toml"
     path.write_text(_toml(tmp_path / f"{name}.sqlite3", str(hook_file), slack=slack, mail=mail,
                               enabled=enabled))
@@ -324,7 +324,7 @@ def test_only_slack_webhook_addresses_are_accepted_and_errors_do_not_echo_them(a
 
 def test_deliver_error_text_omits_the_address_and_transport_detail(tmp_path: Path) -> None:
     hook = tmp_path / "deliver.webhook"
-    hook.write_text(HOOK)
+    write_secret(hook, HOOK)
     config = load_config(_write(tmp_path, "deliver", slack=True, hook_file=hook)).slack
 
     def explode(_url, _payload, _timeout):
@@ -475,7 +475,7 @@ def test_turning_slack_on_after_load_sends_the_next_lifecycle_event(tmp_path: Pa
 
     monkeypatch.setattr(FileSecretResolver, "read_text", spy)
     case = _service(tmp_path, "later", [_human(), _human()], slack=False)
-    (tmp_path / "later.webhook").write_text(HOOK + "\n")
+    write_secret(tmp_path / "later.webhook", HOOK + "\n")
     _tick(case, local(11, 9))
     assert reads == [] and case.slack.calls == []
     case.view.config = load_config(_write(tmp_path, "later-on", slack=True,

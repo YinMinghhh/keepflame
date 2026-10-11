@@ -11,7 +11,7 @@ from keepflame import cli
 from keepflame.core.models import KeepStatus
 from keepflame.capabilities.http import HttpTransportError
 from keepflame.runtime import build_runtime
-from tests.helpers import FakeHttpClient, FakeNotifier, FixedClock, response
+from tests.helpers import write_secret, FakeHttpClient, FakeNotifier, FixedClock, response
 from tests.test_cli import config_file
 from tests.test_joinquant import run_keeper
 from tests.test_orchestrator import local
@@ -46,8 +46,7 @@ def test_malformed_retry_after_is_safe(header):
 
 
 def test_cli_joinquant_human_loop_survives_restart(tmp_path, monkeypatch, capsys):
-    cookie = tmp_path / "synthetic.cookie"
-    cookie.write_text("sid=synthetic-for-offline-test")
+    cookie = write_secret(tmp_path / "synthetic.cookie", "sid=synthetic-for-offline-test")
     config = config_file(tmp_path, cookie)
     http = FakeHttpClient(
         response(200, '{"code":"00000","data":{"taskList":{"login":{"status":0}}}}'),

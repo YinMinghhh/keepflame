@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from keepflame.cli import main
-from tests.helpers import FakeHttpClient, response
+from tests.helpers import FakeHttpClient, response, write_secret
 from tests.test_config import BASE_CONFIG
 
 
@@ -72,8 +72,7 @@ def test_run_once_exit_codes(
     expected_exit: int,
     expected_status: str,
 ) -> None:
-    cookie = tmp_path / "joinquant.cookie"
-    cookie.write_text("sid=test-session")
+    cookie = write_secret(tmp_path / "joinquant.cookie", "sid=test-session")
     fake_http = FakeHttpClient(response(200, payload))
     monkeypatch.setattr("keepflame.runtime.UrllibHttpClient", lambda: fake_http)
     exit_code = main(

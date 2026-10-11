@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 from datetime import datetime
 from dataclasses import replace
 
 from keepflame.capabilities.http import HttpRequest, HttpResponse
 from keepflame.core.models import ActionAttempt, FlameState, KeepResult, PendingNotification, RunRecord
+
+
+def write_secret(path: Path, text: str) -> Path:
+    """Create a secret file with mode 0600 for FileSecretResolver tests."""
+    path = Path(path)
+    path.write_text(text)
+    path.chmod(0o600)
+    return path
 
 
 class FakeHttpClient:

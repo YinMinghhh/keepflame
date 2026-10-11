@@ -25,7 +25,7 @@ from keepflame.notifier.jsonl import JsonlNotifier
 from keepflame.notifier.lifecycle import ConfigView, LifecycleNotifier
 from keepflame.runtime import build_runtime
 from keepflame.storage import SQLiteStorage
-from tests.helpers import FixedClock, SequenceKeeper, StaticRegistry, StaticSecrets
+from tests.helpers import FixedClock, SequenceKeeper, StaticRegistry, StaticSecrets, write_secret
 from tests.test_orchestrator import local
 
 PASSWORD = "MAILBOX-PASSWORD-SENTINEL"
@@ -93,7 +93,7 @@ def _write(tmp_path: Path, name: str, *, mail: bool | None, keeper: str = "fake"
            password_file: Path | None = None, task: str = "checkin") -> Path:
     if password_file is None:
         password_file = tmp_path / f"{name}.smtp"
-        password_file.write_text(PASSWORD + "\n")
+        write_secret(password_file, PASSWORD + "\n")
     path = tmp_path / f"{name}.toml"
     path.write_text(_toml(tmp_path / f"{name}.sqlite3", str(password_file), mail=mail, keeper=keeper, enabled=enabled, task=task))
     return path
@@ -314,7 +314,7 @@ def test_unreadable_password_is_a_delivery_failure_and_leaves_the_keeper_result(
     assert contacted == []
 
     empty = tmp_path / "empty.smtp"
-    empty.write_text("\n")
+    write_secret(empty, "\n")
     empty_case = _service(tmp_path, "empty", [_human()], password_file=empty, connect=connect)
     _tick(empty_case, local(11, 9))
     assert empty_case.storage.get_state("joinquant-primary", "primary").message == "needs a person"
@@ -389,7 +389,7 @@ def test_turning_mail_on_after_load_sends_the_next_lifecycle_event(tmp_path: Pat
 
     monkeypatch.setattr(FileSecretResolver, "read_text", spy)
     case = _service(tmp_path, "later", [_human(), _human()], mail=False, password_file=tmp_path / "later.smtp")
-    (tmp_path / "later.smtp").write_text(PASSWORD + "\n")
+    write_secret(tmp_path / "later.smtp", PASSWORD + "\n")
     _tick(case, local(11, 9))
     assert reads == []
     assert [item["event"] for item in _jsonl(case)] == ["human_action_required"]
