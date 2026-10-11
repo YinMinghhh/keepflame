@@ -3,9 +3,12 @@
 Only identifiers and normalized states are stored here, never browser material.
 """
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
+from keepflame.core.eligibility import zero_claim_pending_allows_new_day
 from keepflame.core.models import ActionAttempt
 
 
@@ -78,7 +81,15 @@ class ControlStorageMixin:
                 validate_time()
             if row is not None:
                 abandoned = self._abandoned(connection, row)
-                if row['day'] >= day or row['state'] == 'pending' and (abandoned is None or day < abandoned['business_day']):
+                blocked_day = row['day'] >= day
+                pending_block = row['state'] == 'pending' and (abandoned is None or day < abandoned['business_day'])
+                # An archive, including unknown, keeps the old write blocked.
+                # Only an unarchived pending with no challenge, answer, or claim can move.
+                if pending_block and not blocked_day and abandoned is None and not self._has_archive(connection, row):
+                    metadata = self._metadata_for_action(connection, row)
+                    if zero_claim_pending_allows_new_day(row['day'], row['state'], metadata, day):
+                        pending_block = False
+                if blocked_day or pending_block:
                     return False
             connection.execute("""INSERT INTO action_attempts VALUES (?,?,?,'pending',?,?,NULL)
                 ON CONFLICT(keeper,account_id,task) DO UPDATE SET
@@ -113,6 +124,97 @@ class ControlStorageMixin:
             return connection.execute("""SELECT 1 FROM runtime_pauses
                 WHERE keeper=? AND account_id=? AND scope IN ('*',?)""",
                                       (keeper, account_id, flame_id)).fetchone() is not None
+
+    def blocks_execution(self, keeper, account_id, flame_id, *, now):
+        """A flame-scoped pause expires the next business day when that run submitted nothing.
+
+        An account-wide pause stays until an explicit resume. An archived pending
+        stays stopped too. Status display can keep using is_paused; this method
+        is the execution check. Releasing the flame pause does not delete the
+        pending action row.
+        """
+        with self._connect() as connection:
+            scopes = [row["scope"] for row in connection.execute(
+                """SELECT scope FROM runtime_pauses
+                   WHERE keeper=? AND account_id=? AND scope IN ('*', ?)""",
+                (keeper, account_id, flame_id))]
+            expired = flame_id in scopes and self._zero_claim_run_expired(
+                connection, keeper, flame_id, account_id, now)
+        if not scopes or "*" in scopes:
+            return "*" in scopes
+        if expired:
+            self.resume(keeper, account_id, flame_id)
+            return False
+        return True
+
+    def zero_claim_pending_released(self, keeper, account_id, task, day) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
+                (keeper, account_id, task)).fetchone()
+            if row is None or row["state"] != "pending" or row["day"] >= day:
+                return False
+            if self._has_archive(connection, row):
+                return False
+            metadata = self._metadata_for_action(connection, row)
+        return zero_claim_pending_allows_new_day(row["day"], row["state"], metadata, day)
+
+    def _has_archive(self, connection, row) -> bool:
+        return connection.execute(
+            "SELECT 1 FROM action_archives WHERE history_id=?",
+            (self._history_id(connection, row),),
+        ).fetchone() is not None
+
+    def _metadata_for_action(self, connection, row):
+        found = connection.execute(
+            "SELECT metadata_json FROM keep_runs WHERE account_id=? AND started_at=?",
+            (row["account_id"], row["started_at"])).fetchall()
+        if len(found) != 1 or not found[0]["metadata_json"]:
+            return None
+        try:
+            data = json.loads(found[0]["metadata_json"])
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _zero_claim_run_expired(self, connection, keeper, flame_id, account_id, now) -> bool:
+        row = connection.execute(
+            """SELECT started_at, metadata_json, business_target_json FROM keep_runs
+               WHERE flame_id=? AND account_id=? ORDER BY started_at DESC LIMIT 1""",
+            (flame_id, account_id)).fetchone()
+        if row is None or not row["business_target_json"]:
+            return False
+        try:
+            metadata = json.loads(row["metadata_json"] or "null")
+            target = json.loads(row["business_target_json"])
+        except ValueError:
+            return False
+        if not isinstance(metadata, dict) or not isinstance(target, dict):
+            return False
+        day, zone_name = target.get("day"), target.get("timezone")
+        if not isinstance(day, str) or not isinstance(zone_name, str):
+            return False
+        try:
+            today = now.astimezone(ZoneInfo(zone_name)).date().isoformat()
+        except Exception:
+            return False
+        if not zero_claim_pending_allows_new_day(day, "pending", metadata, today):
+            return False
+        return not self._archived_action_blocks_release(
+            connection, keeper, account_id, row["started_at"], metadata)
+
+    def _archived_action_blocks_release(self, connection, keeper, account_id, started_at, metadata) -> bool:
+        """An unknown or abandoned archive keeps that pending stopped."""
+        task = metadata.get("task")
+        if isinstance(task, str):
+            rows = connection.execute(
+                "SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
+                (keeper, account_id, task)).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND started_at=?",
+                (keeper, account_id, started_at)).fetchall()
+        return any(row["state"] == "pending" and self._has_archive(connection, row) for row in rows)
 
     def pause(self, keeper, account_id, scope, reason, now):
         with self._connect() as connection:

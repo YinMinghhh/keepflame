@@ -149,7 +149,9 @@ def test_first_request_failure_reaches_keeper_cli_and_jsonl_after_gate_cleanup()
     context = KeeperContext("reading", "synthetic", SETTINGS, CapabilityRegistry({"browser": Browser()}),
                             StaticSecrets(AssertionError("no credentials")), MemoryStorage(), now)
     result = JoinQuantBrowserKeeper(page_factory=lambda *_a, **_kw: gateway).keep(context)
-    assert result.status is KeepStatus.FAILED and result.metadata["automation_paused"]
+    assert result.status is KeepStatus.FAILED
+    assert result.metadata["stage_counts"]["claim"] == 0
+    assert "automation_paused" not in result.metadata
     assert result.metadata["blocked_request"]["phase"] == "reading" and guard.phase == "stopped"
     record = SimpleNamespace(result=result, started_at=now, business_target=None, clock_regressed=False, finished_at=now, run_id="synthetic", flame_id="reading", account_id="synthetic")
     output = _outcome_dict(SimpleNamespace(record=record))

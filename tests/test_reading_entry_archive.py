@@ -219,7 +219,9 @@ def test_known_reason_cannot_fall_back_through_any_review_entry(case, monkeypatc
     assert table_snapshot(store) == before
     assert store.get_action('joinquant', 'primary', 'reading').state == 'pending'
     assert store.is_paused('joinquant', 'primary', 'reading')
-    assert not store.reserve_action('joinquant', 'primary', 'reading', '2026-10-09', NOW)
+    assert store.action_audit('joinquant', 'primary', 'reading')['archives'] == []
+    assert store.reserve_action('joinquant', 'primary', 'reading', '2026-10-09', NOW)
+    assert store.get_action('joinquant', 'primary', 'reading').day == '2026-10-09'
 
 
 @pytest.mark.parametrize('row,key,value', [

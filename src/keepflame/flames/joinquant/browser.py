@@ -11,13 +11,54 @@ from zoneinfo import ZoneInfo
 
 from keepflame.capabilities.browser import BrowserUnavailable, ProfileNotAuthorized
 from keepflame.capabilities.http import HttpResponse
-from keepflame.core.models import HumanAction, KeepResult, KeepStatus
+from keepflame.core.models import HumanAction, KeepResult, KeepStatus, Reward, RewardSource
 from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper, _unique_json_object
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
 from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
 from keepflame.flames.joinquant.task import TaskConfigurationError, task_from_settings
 from keepflame.flames.joinquant.day import BusinessDayFence
 from keepflame.core.models import CompletionReceipt
+from keepflame.flames.joinquant.history import credit_evidence, fetch_credit_history
+
+
+def _checkin_write_submitted(task_name, stage_counts) -> bool:
+    if task_name != "checkin" or not isinstance(stage_counts, dict):
+        return False
+    return any(type(stage_counts.get(key)) is int and stage_counts[key] > 0
+               for key in ("challenge", "answer", "claim"))
+
+
+def _zero_claim_button_miss(task_name, metadata, stage_counts) -> bool:
+    if task_name != "checkin" or metadata.get("reason") != "signin_button_changed":
+        return False
+    if metadata.get("pause_account") or metadata.get("unconfirmed_reason") in {
+            "pending_different_day", "action_confirmation_rejected"}:
+        return False
+    if not isinstance(stage_counts, dict):
+        return False
+    return all(type(stage_counts.get(key)) is int and stage_counts[key] == 0
+               for key in ("challenge", "answer", "claim"))
+
+
+def _previous_zero_claim_released(storage, account_id, task_name, day) -> bool:
+    checker = getattr(storage, "zero_claim_pending_released", None)
+    if not callable(checker):
+        return False
+    return bool(checker("joinquant", account_id, task_name, day))
+
+
+def _safe_history(page):
+    try:
+        return fetch_credit_history(page)
+    except Exception:
+        return None
+
+
+def _safe_credit(before, after, task, started_at):
+    try:
+        return credit_evidence(before, after, task=task, started_at=started_at)
+    except Exception:
+        return {"proven": False, "amount": None}
 
 
 class JoinQuantPage:
@@ -58,6 +99,19 @@ class JoinQuantPage:
             raise FlowError("login_required", 401)
         if urlsplit(self.page.url).netloc != urlsplit(self.origin).netloc:
             raise FlowError("unexpected_origin")
+        if self.task.name == "checkin":
+            # The floor and credit center fetch task info after DOMContentLoaded.
+            # Those reads are only admitted while this phase is still loading.
+            self._wait_for_credit_reads()
+
+    def _wait_for_credit_reads(self):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self.guard.counts["page_status"] < 2:
+            self.guard.check()
+            try:
+                self.page.wait_for_timeout(50)
+            except Exception as exc:
+                raise FlowError("signin_button_changed") from exc
 
     def inspect(self, now):
         return JoinQuantKeeper._interpret(self.guard.read_status(), now=now, task=self.task.name)
@@ -112,6 +166,28 @@ class JoinQuantPage:
             return button
         return self.page.get_by_role("button", name="签到", exact=True)
 
+    def wait_for_checkin_button(self):
+        """Click only after the page has drawn exactly one 签到 button.
+
+        The official floor and credit center each read task info once. Those
+        two reads are what produce the button. A missing button is not a claim.
+        """
+        button = self.page.get_by_role("button", name="签到", exact=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            self.guard.check()
+            try:
+                count = button.count()
+            except Exception:
+                count = 0
+            if self.guard.counts["page_status"] >= 2 and count == 1:
+                return button
+            try:
+                self.page.wait_for_timeout(50)
+            except Exception as exc:
+                raise FlowError("signin_button_changed") from exc
+        raise FlowError("signin_button_changed")
+
     def _diagnose_reading_entry(self):
         """Record completed checks only: a failed renderer must never be queried.
 
@@ -134,9 +210,12 @@ class JoinQuantPage:
         }
 
     def challenge(self):
-        button = self._button()
-        if button.count() != 1:
-            raise FlowError("signin_button_changed")
+        if self.task.name == "checkin":
+            button = self.wait_for_checkin_button()
+        else:
+            button = self._button()
+            if button.count() != 1:
+                raise FlowError("signin_button_changed")
         self.guard.arm_challenge()
         def matches(request):
             return (urlsplit(request.url).path == CHALLENGE_PATH
@@ -311,10 +390,26 @@ class JoinQuantBrowserKeeper:
             invoke(gateway.open)
         before = inspect()
 
+        # A previous day that sent no challenge, answer, or claim can be reserved again.
+        # A submitted claim, a same-day pending, a missing count, and any archive stay blocked.
+        released = False
+        if action is not None and action.state == "pending" and action.day != day:
+            released = _previous_zero_claim_released(context.storage, context.account_id, task.name, day)
+            if not released:
+                return self._unconfirmed(context, before, cause="pending_different_day")
+
         def complete(observation, automatic):
             observed_at = fence.check()
             issue = getattr(context, "completion_receipt", None)
             receipt = issue() if issue is not None else CompletionReceipt(fence.target, observed_at)
+            # confirm_action matches today's pending row. Move a released older
+            # pending onto today before that match, or the observation is rejected.
+            if released and not progress["reserved"]:
+                if not context.storage.reserve_action(
+                        "joinquant", context.account_id, task.name, day, context.now,
+                        validate_time=fence.check):
+                    return self._unconfirmed(context, observation, cause="action_reservation_rejected")
+                progress["reserved"] = True
             if (action is not None and action.state == "pending") or progress["reserved"]:
                 if not context.storage.confirm_action("joinquant", context.account_id, task.name, fence.check(), day=day, validate_time=fence.check):
                     return self._unconfirmed(context, observation, cause="action_confirmation_rejected")
@@ -322,14 +417,9 @@ class JoinQuantBrowserKeeper:
             # later cleanup/return time must not reclassify this confirmed completion.
             return replace(observation, receipt=receipt,
                            metadata={**observation.metadata, "automatic_action": automatic})
-
-        # A current-day observation cannot settle a different day's intent.
-        if action is not None and action.state == "pending" and action.day != day:
-            return self._unconfirmed(context, before, cause="pending_different_day")
         if before.status is KeepStatus.SUCCESS:
             return complete(before, False)
-        # An uncertain previous write blocks every future write, even across days.
-        if action is not None and action.state == "pending":
+        if action is not None and action.state == "pending" and not released:
             return self._unconfirmed(context, before)
         if action is not None and action.state == "confirmed" and action.day == day:
             return self._unconfirmed(context, before, cause="same_day_action_consumed")
@@ -359,6 +449,10 @@ class JoinQuantBrowserKeeper:
                 return self._unconfirmed(context, before, cause="reading_qualification_unconfirmed")
         if task.name == "reading":
             invoke(gateway.open)
+        if task.name == "checkin":
+            wait_button = getattr(gateway, "wait_for_checkin_button", None)
+            if callable(wait_button):
+                invoke(wait_button)
         if not reserve("claim"):
             return self._unconfirmed(context, before, cause="action_reservation_rejected")
         payload = piece = None
@@ -394,19 +488,21 @@ class JoinQuantBrowserKeeper:
         except TaskConfigurationError as exc:
             return self._stop(context, str(exc), human=True)
         profile = context.settings.get("browser_profile_dir")
-        headless = context.settings.get("browser_headless", True)
-        if not isinstance(profile, str) or not profile or type(headless) is not bool:
+        headless_setting = context.settings.get("browser_headless", True)
+        if not isinstance(profile, str) or not profile or type(headless_setting) is not bool:
             return self._stop(context, "browser_configuration", human=True)
         deadline = time.monotonic() + 60 + (task.wait_seconds if task.name == "reading" else 0)
         fence = BusinessDayFence(context)
         gateway = None
         completed = None
+        credit = {"proven": False, "amount": None}
         progress = {"reserved": False, "action_stage": "inspect"}
         try:
             browser = context.capabilities.require("browser")
             # The dedicated window stays visible. browser_headless cannot hide it.
             with browser.open(profile_dir=profile, account_id=context.account_id,
                               origin=JOINQUANT_ORIGIN, headless=False) as page:
+                before_history = _safe_history(page)
                 fence.check()
                 options = {"deadline": deadline, "date_fence": fence}
                 if task.name == "reading":
@@ -417,6 +513,7 @@ class JoinQuantBrowserKeeper:
                     if result.status is KeepStatus.SUCCESS and result.receipt is not None:
                         completed = result
                 finally:
+                    credit = _safe_credit(before_history, _safe_history(page), task.name, context.now)
                     # Close the task page before removing its gate, keeping the account
                     # browser context alive. Fakes may omit close; production never does.
                     if hasattr(gateway, "close"):
@@ -446,7 +543,7 @@ class JoinQuantBrowserKeeper:
                 "automation_paused": True, "reason": "browser_cleanup_failed",
                 "cleanup_reason": result.metadata.get("reason", "browser_operation_failed")})
         metadata = {**result.metadata, "task": task.name, "action_stage": progress["action_stage"],
-                    "browser_window": "visible"}
+                    "browser_window": "visible", "credit_line": credit}
         if progress["reserved"] and result.status is not KeepStatus.SUCCESS:
             metadata["automation_paused"] = True
         if gateway is not None and hasattr(gateway, "guard"):
@@ -466,4 +563,23 @@ class JoinQuantBrowserKeeper:
                 "blocked_algorithm_list": counts["blocked_algorithm_list"],
                 "blocked_page_status": counts["blocked_page_status"],
             }
-        return replace(result, metadata=metadata)
+        stage_counts = metadata.get("stage_counts")
+        # Nothing was submitted. Do not pause a releasable zero-claim attempt.
+        # An archived pending, or a confirmation the storage rejected, stays stopped.
+        # A check-in that already sent a challenge, answer, or claim stays stopped.
+        submitted_checkin = _checkin_write_submitted(task.name, stage_counts)
+        if (isinstance(stage_counts, dict) and type(stage_counts.get("claim")) is int
+                and stage_counts["claim"] == 0 and not submitted_checkin
+                and not metadata.get("pause_account")
+                and metadata.get("unconfirmed_reason") not in {
+                    "pending_different_day", "action_confirmation_rejected"}):
+            metadata.pop("automation_paused", None)
+        if _zero_claim_button_miss(task.name, metadata, stage_counts):
+            metadata.pop("automation_paused", None)
+            # One short retry. The failure ladder must not push this to six hours.
+            metadata["same_day_retry_minutes"] = 30
+            result = replace(result, next_action_at=context.now + timedelta(minutes=30))
+        reward = result.reward
+        if credit.get("proven") is True and type(credit.get("amount")) is int and credit["amount"] > 0:
+            reward = Reward(str(credit["amount"]), "积分", RewardSource.OBSERVED)
+        return replace(result, metadata=metadata, reward=reward)

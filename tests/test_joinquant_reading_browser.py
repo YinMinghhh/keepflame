@@ -155,7 +155,11 @@ def test_reading_original_page_and_claim_gates(case):
                 assert counts["reading_registration"] == (case == "read_then_claim")
                 assert counts["blocked_algorithm_list"] == (case == "read_then_claim")
             else:
-                assert result.status is not KeepStatus.SUCCESS and result.metadata["automation_paused"]
+                assert result.status is not KeepStatus.SUCCESS
+                if counts["claim"] == 0 and not result.metadata.get("pause_account"):
+                    assert "automation_paused" not in result.metadata
+                else:
+                    assert result.metadata["automation_paused"]
             if case in ENTRY_FAILURES:
                 assert counts["reading_registration"] == counts["answer"] == counts["claim"] == 0
                 assert counts["challenge"] == (1 if case == "wrong_callback" else 0)

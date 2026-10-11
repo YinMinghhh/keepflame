@@ -8,6 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from keepflame.core.config import FlameConfig
+from keepflame.core.eligibility import execution_paused
 from keepflame.core.models import (
     BusinessTarget,
     CompletionReceipt,
@@ -62,7 +63,7 @@ class Orchestrator:
         notify: bool = True,
         business_target: BusinessTarget | None = None,
     ) -> RunOutcome:
-        if self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
+        if execution_paused(self.storage, flame.keeper, flame.account_id, flame.id, now=now or self.clock.now()):
             raise AutomationPaused("automation is paused; inspect status and resume explicitly")
         started_at = (now or self.clock.now()).astimezone(timezone.utc)
         target = business_target or BusinessTarget.at(started_at, flame.schedule.timezone)
@@ -119,14 +120,18 @@ class Orchestrator:
                              "reason": "clock_regressed"})
         same_target = previous is not None and previous.last_checked_target == target
         failures = (previous.consecutive_failures if same_target else 0) + 1
+        retry_minutes = result.metadata.get("same_day_retry_minutes")
+        short_retry = type(retry_minutes) is int and 1 <= retry_minutes < 360
         result = replace(
             result,
             metadata={**result.metadata, "business_target": target.to_dict()},
             next_action_at=next_after_result(
                 flame.schedule, finished_at, result.status,
-                requested_at=result.next_action_at,
-                consecutive_failures=failures,
+                requested_at=(finished_at + timedelta(minutes=retry_minutes)
+                              if short_retry else result.next_action_at),
+                consecutive_failures=1 if short_retry else failures,
                 completed_target=None if result.receipt is None else result.receipt.target,
+                maximum=timedelta(hours=6) if short_retry else None,
             ),
         )
         event, mark_reminder = self._notification(
@@ -293,9 +298,33 @@ class Orchestrator:
                 return "flame_failed", False
             return None, False
 
+        line = cls._credit_line_for_target(result, target)
+        if line is not None:
+            return "credit_recorded", False
         if previous is not None and previous.status is not KeepStatus.SUCCESS:
             return "flame_recovered", False
         return None, False
+
+    @staticmethod
+    def _credit_line_for_target(result: KeepResult, target: BusinessTarget):
+        """A proven line counts only when its own timestamp falls on this target day."""
+        line = result.metadata.get("credit_line")
+        if not isinstance(line, dict) or line.get("proven") is not True:
+            return None
+        amount, item, stamp = line.get("amount"), line.get("item"), line.get("at")
+        if type(amount) is not int or isinstance(amount, bool) or amount <= 0:
+            return None
+        if not isinstance(item, str) or not item or not isinstance(stamp, str):
+            return None
+        try:
+            moment = datetime.fromisoformat(stamp)
+        except ValueError:
+            return None
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            return None
+        if moment.astimezone(ZoneInfo(target.timezone)).date().isoformat() != target.day:
+            return None
+        return line
 
     @staticmethod
     def _at_or_after_reminder(flame: FlameConfig, now: datetime) -> bool:

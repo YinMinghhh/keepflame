@@ -23,17 +23,17 @@ reading_wait_seconds = 30
 
 每轮先用原生请求查后端。若需阅读，在导航前持久化 pending 动作；若已可领取，在请求挑战前持久化 pending。原页面只允许为指定文章自然登记一次，之后重新查资格；未确认资格就暂停，不能继续领。领取按钮限定在唯一“浏览社区文章”卡片，最终表单规则必须是 post_view。签到仍只允许 login，不能配置任意规则。
 
-每轮最多一个挑战、一个滑块答案和一个最终领取；图片布局、匹配或请求不明即停止。原生领取响应成功后最多后查三次，只有后端状态 1 才成功并确认动作。未确认动作跨进程、跨日保留 pending；恢复只允许只读确认，不能重置预算。失败/认证问题通过 automation_paused（认证另有 pause_account）交给核心持久暂停，禁止后台重复试。
+每轮最多一个挑战、一个滑块答案和一个最终领取；图片布局、匹配或请求不明即停止。原生领取响应成功后最多后查三次，只有后端状态 1 才成功并确认动作。未确认动作跨进程、跨日保留 pending；恢复只允许只读确认，不能重置预算。已提交领取或认证问题通过 automation_paused（认证另有 pause_account）交给核心持久暂停，禁止后台重复试。本轮领取计数恰好为整数 0、且该 pending 没有归档时，不写 automation_paused，下一业务日仍可再查。已归档的 pending 保持暂停。
 
 阅读最大时间是 60 秒基础预算加配置的真实等待，签到仍 60 秒；原生账号请求上限 10 秒，禁止重定向和传输重试。阅读的后端查询最多初查1、资格后查1、完成后查3，另允许积分页自身渲染读1；渲染读不作为完成证据。更晚的 Retry-After 保留。
 
 ## 会话、图像与隐私
 
-每轮只关闭任务页面，然后移除本轮注册的 route handler，保留 capability 所拥有的账号上下文；不能把旧门禁残留到下一轮。专用登录、长期浏览器生命周期及暂停恢复由 capability/Core 管理。关闭浏览器仍可能丢失 session cookie；不导出 cookie、不复制开发机 profile、不保证重启后免登录。真实登录、阅读或领取均须另外授权，本插件测试不要求本人操作。
+每轮只关闭任务页面，然后移除本轮注册的 route handler，保留 capability 所拥有的账号上下文；不能把旧门禁残留到下一轮。专用登录、长期浏览器生命周期及暂停恢复由 capability/Core 管理。人工登录窗口放行官方登录验证码 `/common/verifyCode/`（登录滑块、图形码和短信），否则登录按钮会停在验证码请求上且页面没有错误提示。同一窗口仍阻断 `/credits/`、`/user/account/getToken` 和 `/community/post/postView`，不能在登录过程中领取积分或登记阅读。关闭浏览器后，该 profile 会留下聚宽响应中没有有效期的 HttpOnly 会话 Cookie，并只在这个目录里补上有限有效期；下一个使用同一 profile 的进程会在同源请求中带上它。Cookie 值不进入日志、profile 以外的文件或其他账号 profile，也不复制开发机 profile。远端返回 10001 时仍是等待人工，本地保留不是登录成功。真实登录、阅读或领取均须另外授权，本插件测试不要求本人操作。
 
 拼图从响应内存解码，Pillow 图像以 finally/ExitStack 关闭，求解后的图像 URI 引用及时释放；没有真实图片文件或调试截图。浏览器自己的缓存、崩溃日志和 profile 不因此保证完全无落盘；不删除既存用户数据以制造该保证。
 
-不保存账号响应全文、任意字段、token、签名参数或 cookie。结果只保留固定状态/类型、阶段计数、错误码及任务枚举。首次导致本轮停止的页面请求另以 `blocked_request` 保存固定标签：方法、origin 类别、已知 endpoint、发生阶段、资源类型、frame 关系及 query/fragment 存在与否；未知值归为 other/unknown，不保存 URL、body 或 header。后续请求及清理不能覆盖首次失败证据，CLI JSON、持久结果和 JSONL 通知保留该字段。配置/Profile 必须留在仓库和发布包之外；邮件功能本轮暂停。
+不保存账号响应全文、任意字段、token、签名参数或 cookie。结果只保留固定状态/类型、阶段计数、错误码及任务枚举。首次导致本轮停止的页面请求另以 `blocked_request` 保存固定标签：方法、origin 类别、已知 endpoint、发生阶段、资源类型、frame 关系及 query/fragment 存在与否；未知值归为 other/unknown，不保存 URL、body 或 header。后续请求及清理不能覆盖首次失败证据，CLI JSON、持久结果和 JSONL 通知保留该字段。配置/Profile 必须留在仓库和发布包之外。邮箱通知由 notifier 投递，默认关闭，不连接真实邮箱。
 
 官方文章初始化的 `POST /algorithm/index/runList` 是一个精确的本地阻断例外：阅读阶段、首次文章导航后的原任务主 frame、精确官方 URL、空 POST、xhr/fetch、每轮最多一次时，只 abort 并增加 `stage_counts.blocked_algorithm_list`，不终止阅读。请求仍不发给服务器，也不返回伪造成功；重复、参数/来源/阶段变化及其他未知写请求继续停止。该计数与 `blocked_request` 不同：前者是容忍的本地阻断，后者是导致停机的首个请求。阅读资格及领取规则保持不变，现有 pending 不会被修复清除。
 
@@ -48,7 +48,11 @@ KEEPFLAME_SYNTHETIC_BROWSER=1 .venv/bin/python -m pytest tests/test_joinquant_re
 
 阅读目前仅公开源码依据+离线/合成 Chrome 验证，未使用真实账号观察资格或领取。官方 DOM/回调变化时停止，不临时放宽门禁。平台协议限制未经授权第三方接入，技术实现不代表平台许可。精确接口与公开依据见 [PROTOCOL.md](PROTOCOL.md)。
 
-当前日状态不能证明其他日期的未决动作完成。已有 pending 的 day 与本轮北京时间业务日不一致时，即使观察到 complete，也保留观察元数据并返回 WAITING_HUMAN / pending_different_day，继续暂停；不读取文章、不挑战、不领取、不确认旧动作。只有同日且存储原子确认成功才收敛该 pending；存储拒绝则以 action_confirmation_rejected 停止。
+当前日状态不能证明其他日期的未决动作完成。已有 pending 的 day 与本轮北京时间业务日不一致时，即使观察到 complete，也保留观察元数据并返回 WAITING_HUMAN / pending_different_day，继续暂停；不读取文章、不挑战、不领取、不确认旧动作。只有同日且存储原子确认成功才收敛该 pending；存储拒绝则以 action_confirmation_rejected 停止。例外：该 pending 关联运行的 stage_counts.claim 恰好是整数 0，且没有归档证书时，下一个 Asia/Shanghai 业务日可以重新预留，原行换成新的 pending，不删除历史。若当天官方状态已经完成，先把该 pending 预留到当天再确认。已提交领取、同一天、缺少该计数或已有归档的 pending 仍停在原日并继续暂停。
+
+签到在离开加载阶段前等待官方页面自己的两次 task-info 读取；这两次读取只在加载阶段放行。随后只在页面上恰好有一个「签到」按钮时点击一次。签到多出来的 task-info 读取只记入 blocked_page_status，不停止这一轮，也不算领取。阅读任务的第三次初始读取仍以 page_status_budget 停止。没有发出挑战、答案或领取、只因按钮未出现而失败的签到，会在同一上海日、六小时内再次到期，不暂停账号。已经发出挑战、答案或领取的失败保持长时间退避，当天和下一天都继续停止，未决写入不会改到新的一天。
+
+聚宽浏览器任务使用可见窗口。browser_headless = true 不会隐藏这个窗口，结果 metadata 的 browser_window 为 visible。官方积分流水出现本轮任务的新行时，结果记录该行时间、项目原文和数量，奖励单位是积分、来源是观察到的值。流水缺失、code 20000 或没有新增时，金额记为未证实，不编造数量，也不构造奖励。
 
 运行中业务日期由 Core 的实时 clock 提供，固定为本轮开始的上海日期。每次外部状态读取、耗时阅读、挑战、求解、提交前后以及最终确认都校验日期；请求门禁在每个页面请求和原生响应处也校验，HTTP Date 存在时必须同日。日期变化或时钟退回其他日期后锁定 business_day_changed，即使时间跳回也不重试，旧 intent 保持 pending。SQLite 事务中的日期检查失败会回滚。独立构造的 Context 未提供 clock 时以开始时间加单调时钟经过时间推进；生产 Orchestrator 始终传入实时 clock。
 

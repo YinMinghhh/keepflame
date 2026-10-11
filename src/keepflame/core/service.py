@@ -9,6 +9,7 @@ from keepflame.core.config import AppConfig
 from keepflame.core.models import RunOutcome
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.protocols import Clock, Storage
+from keepflame.core.eligibility import execution_paused
 from keepflame.core.schedule import due_at
 
 
@@ -38,7 +39,8 @@ class SchedulerService:
         outcomes: list[RunOutcome] = []
         for flame in self.config.enabled_flames():
             current = (self.clock.now() if outcomes or now is None else now).astimezone(timezone.utc)
-            if self.stop_event.is_set() or self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
+            if self.stop_event.is_set() or self.blocked(flame) or execution_paused(
+                    self.storage, flame.keeper, flame.account_id, flame.id, now=current):
                 continue
             state = self.storage.get_state(flame.id, flame.account_id)
             if due_at(flame.schedule, state, current) <= current:
@@ -50,7 +52,8 @@ class SchedulerService:
             notification_due = self.orchestrator.deliver_pending(flame, now=current)
             if notification_due is not None and (next_due is None or notification_due < next_due):
                 next_due = notification_due
-            if self.stop_event.is_set() or self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
+            if self.stop_event.is_set() or self.blocked(flame) or execution_paused(
+                    self.storage, flame.keeper, flame.account_id, flame.id, now=current):
                 continue
             state = self.storage.get_state(flame.id, flame.account_id)
             candidate = due_at(flame.schedule, state, current)

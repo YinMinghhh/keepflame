@@ -318,7 +318,7 @@ class SignInGuard:
                             and request.frame.url == SIGNIN_PAGE_URL)
         except Exception:
             credit_frame = False
-        if (self.task == "reading" and self.phase == "loading" and credit_frame
+        if (self.task in ("checkin", "reading") and self.phase == "loading" and credit_frame
                 and self.counts["navigation"] == 1 and request.url == TASK_INFO_URL
                 and request.resource_type in {"xhr", "fetch"} and request.post_data in (None, "")):
             # The floor and credit-center components each issue one native GET.
@@ -326,6 +326,11 @@ class SignInGuard:
             if self.counts["page_status"] < 2:
                 self.counts["page_status"] += 1
                 self.forward(route, "page_status", 1_048_576)
+                return
+            if self.task == "checkin":
+                # Later reads are not the button and are not a claim. Do not stop.
+                self.counts["blocked_page_status"] = min(100, self.counts["blocked_page_status"] + 1)
+                route.abort("blockedbyclient")
                 return
             self.stop("page_status_budget", request=request)
         # Callback refreshes after submission remain blocked. They cannot spend

@@ -43,6 +43,7 @@ def next_after_result(
     requested_at: datetime | None = None,
     consecutive_failures: int = 0,
     completed_target: BusinessTarget | None = None,
+    maximum: timedelta | None = None,
 ) -> datetime:
     now = _as_utc(now)
     zone = ZoneInfo(schedule.timezone)
@@ -62,6 +63,8 @@ def next_after_result(
     # Platform cooldowns are lower bounds, never permission for an earlier retry.
     if requested_at is not None:
         candidate = max(candidate, _as_utc(requested_at))
+    if maximum is not None and candidate - now >= maximum:
+        candidate = now + maximum - timedelta(seconds=1)
     return _in_window(schedule, candidate)
 
 

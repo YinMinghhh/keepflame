@@ -16,7 +16,7 @@ schema v4 新增 `daemon_owner` / `run_requests`，由 v1/v2/v3 保留原记录�
 
 专属锁文件为数据库旁的 `.daemon-UUID.lock`，只接受规范 UUID，0600且内容为空，正常退出移除。进程异常退出后系统释放 flock；残留文件存在或另一个世代持锁均不算当前 owner 在线。active 和两种锁快照都不是认证有效性、执行进度或未来完成保证。此修订不改变 schema v4，不增加凭据、网络端口或系统安全配置。
 
-动作确认必须显式提供原动作的 day，并按 keeper/account/task/day/pending 原子匹配，返回是否成功；确认不改写 day 或 started_at。错日、缺失或已确认记录不能被新观察覆盖。此修复不迁移 schema、不改既有记录，旧 pending 继续跨日阻止写操作。
+动作确认必须显式提供原动作的 day，并按 keeper/account/task/day/pending 原子匹配，返回是否成功；确认不改写 day 或 started_at。错日、缺失或已确认记录不能被新观察覆盖。此修复不迁移 schema、不改既有记录。关联 keep_runs 里 stage_counts.claim 恰好为整数 0、且没有归档的 pending，可以在更晚的业务日重新预留；当前行换成新的 pending，历史不删除。已提交领取、同一天或缺少该计数的 pending 仍阻止写入。已有 unknown 或其他归档的 pending 不因零次领取解除 Flame 暂停。账号范围的暂停不因零次领取自动解除。
 
 schema v5 仅添加动作审计表和触发器，支持从 v1/v2/v3/v4 升级；迁移逐字段复制现有 action_attempts 到 action_history，不更改原行。以后每次保留预算或确认都追加完整快照，历史与 action_archives 禁止 UPDATE/DELETE，当前意图也禁止 DELETE。新日预留可替换当前槽位，原始 pending、日期和开始时间仍永久保存在历史中。
 
