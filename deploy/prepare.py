@@ -388,6 +388,12 @@ def render_plan(server_home: Path, commit: str) -> tuple[dict[str, object], dict
         'to = ["operator@example.invalid"]',
         "timeout_seconds = 15",
         "",
+        "# Slack delivery exists and stays off. This candidate holds no real webhook address.",
+        "[notify.slack]",
+        "enabled = false",
+        f"webhook_file = {quote(paths['runtime'] / 'secrets/slack-webhook.url')}",
+        "timeout_seconds = 15",
+        "",
     ])
     report = {"dry_run": True, "installed": False, "tasks_enabled": False, "execution_enabled": False,
               "timezone": "Asia/Shanghai", "commit": commit, "paths": {k: str(v) for k, v in paths.items()},

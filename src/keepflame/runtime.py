@@ -201,6 +201,7 @@ def build_runtime(
     browser: IsolatedBrowser | OwnedBrowserSession | BrowserPool | None = None,
     restore_browser_session: bool = False,
     mail_connect=None,
+    slack_post=None,
 ) -> Runtime:
     if restore_browser_session and browser is not None:
         raise ConfigError("browser session restoration requires the runtime-owned browser")
@@ -209,7 +210,9 @@ def build_runtime(
     notifier = JsonlNotifier(stream)
     config_view = ConfigView(config)
     secrets = FileSecretResolver()
-    lifecycle = LifecycleNotifier(notifier, config_view, secrets, connect=mail_connect)
+    lifecycle = LifecycleNotifier(
+        notifier, config_view, secrets, connect=mail_connect, slack_post=slack_post,
+    )
     clock = SystemClock()
     registry = EntryPointKeeperRegistry()
     for keeper_name in {flame.keeper for flame in config.enabled_flames()}:

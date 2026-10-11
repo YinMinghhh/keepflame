@@ -208,6 +208,6 @@ The 2026-10-06 continuation authorizes offline implementation and synthetic
 verification of separate JoinQuant reading credits, long-lived browser contexts
 and disabled deployment preparation. This does not authorize live reading,
 login, reward claims, copying account profiles, server connections or service
-installation. Email delivery is optional, off by default, and development must not contact a live mailbox. Keep every default non-executing, preserve
+installation. Email and Slack delivery are optional, off by default, and development must not contact a live mailbox or live Slack. The Slack webhook address lives only in an absolute-path file outside the repository, is read only at send time, and never appears in config objects, logs, errors, messages or tests. Keep every default non-executing, preserve
 unconfirmed action intents across restarts and never require a human login for
 development tests.

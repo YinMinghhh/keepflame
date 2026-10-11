@@ -30,3 +30,9 @@ from = "keepflame@example.invalid"
 to = ["operator@example.invalid"]
 timeout_seconds = 15
 
+# Slack delivery exists and stays off. This example holds no real webhook address.
+[notify.slack]
+enabled = false
+webhook_file = "/absolute/path/to/slack-webhook.url"
+timeout_seconds = 15
+

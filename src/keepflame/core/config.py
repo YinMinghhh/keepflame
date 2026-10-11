@@ -41,6 +41,19 @@ class EmailConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SlackConfig:
+    """Optional Slack Incoming Webhook delivery.
+
+    Only the absolute path of the file holding the webhook address is kept here.
+    The address itself is read at send time and never stored on this object.
+    """
+
+    enabled: bool
+    webhook_file: Path
+    timeout_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduleConfig:
     timezone: str
     first_check: time
@@ -76,6 +89,7 @@ class AppConfig:
     source_path: Path
     source_fingerprint: str | None = None
     email: EmailConfig | None = None
+    slack: SlackConfig | None = None
 
     def enabled_flames(self) -> tuple[FlameConfig, ...]:
         return tuple(flame for flame in self.flames if flame.enabled)
@@ -131,12 +145,17 @@ def _validate_json_value(value: Any, name: str) -> JsonValue:
     raise ConfigError(f"{name} must contain only JSON-compatible values")
 
 
-def _parse_email(raw: dict[str, Any]) -> EmailConfig | None:
+def _notify_table(raw: dict[str, Any]) -> dict[str, Any] | None:
     if "notify" not in raw:
         return None
     notify = _expect_table(raw.get("notify"), "notify")
-    _reject_unknown(notify, {"email"}, "notify")
-    if "email" not in notify:
+    _reject_unknown(notify, {"email", "slack"}, "notify")
+    return notify
+
+
+def _parse_email(raw: dict[str, Any]) -> EmailConfig | None:
+    notify = _notify_table(raw)
+    if notify is None or "email" not in notify:
         return None
     table = _expect_table(notify.get("email"), "notify.email")
     _reject_unknown(
@@ -192,6 +211,40 @@ def _parse_email(raw: dict[str, Any]) -> EmailConfig | None:
         recipients=recipients,
         timeout_seconds=float(timeout),
     )
+
+
+def _repository_root() -> Path | None:
+    """Source checkout that contains this module, or None for an installed package."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "keepflame").is_dir():
+            return parent
+    return None
+
+
+def _parse_slack(raw: dict[str, Any]) -> SlackConfig | None:
+    notify = _notify_table(raw)
+    if notify is None or "slack" not in notify:
+        return None
+    table = _expect_table(notify.get("slack"), "notify.slack")
+    _reject_unknown(table, {"enabled", "webhook_file", "timeout_seconds"}, "notify.slack")
+    enabled = table.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("notify.slack.enabled must be true or false")
+    timeout = table.get("timeout_seconds", 15)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= float(timeout) <= 120:
+        raise ConfigError("notify.slack.timeout_seconds must be a number from 1 to 120")
+    file_raw = table.get("webhook_file")
+    if not isinstance(file_raw, str) or not file_raw.strip() or any(
+        character in file_raw for character in "\r\n"
+    ):
+        raise ConfigError("notify.slack.webhook_file must be a single-line absolute path")
+    file_path = Path(file_raw.strip()).expanduser()
+    if not file_path.is_absolute():
+        raise ConfigError("notify.slack.webhook_file must be an absolute path")
+    root = _repository_root()
+    if root is not None and file_path.resolve().is_relative_to(root):
+        raise ConfigError("notify.slack.webhook_file must be outside the repository")
+    return SlackConfig(enabled=enabled, webhook_file=file_path, timeout_seconds=float(timeout))
 
 
 def default_config_path() -> Path:
@@ -294,5 +347,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         source_path=source,
         source_fingerprint=hashlib.sha256(source_bytes).hexdigest(),
         email=_parse_email(raw),
+        slack=_parse_slack(raw),
     )
 
