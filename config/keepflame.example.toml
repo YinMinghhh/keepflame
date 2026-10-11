@@ -19,3 +19,15 @@ stop_at = "23:00"
 # Cookie header value. Never put the value itself in this TOML file.
 cookie_file = "/run/secrets/joinquant.cookie"
 
+# Email delivery exists and stays off. This example is not a live mailbox.
+[notify.email]
+enabled = false
+host = "smtp.example.invalid"
+port = 587
+security = "starttls"
+username = "keepflame@example.invalid"
+password_file = "/run/secrets/smtp.password"
+from = "keepflame@example.invalid"
+to = ["operator@example.invalid"]
+timeout_seconds = 15
+

@@ -375,6 +375,20 @@ def render_plan(server_home: Path, commit: str) -> tuple[dict[str, object], dict
                 '# article_url = "https://www.joinquant.com/view/community/detail/123456"',
             ])
         config.append("")
+    config.extend([
+        "# Email delivery exists and stays off. This candidate is not a live mailbox.",
+        "[notify.email]",
+        "enabled = false",
+        'host = "smtp.example.invalid"',
+        "port = 587",
+        'security = "starttls"',
+        'username = "keepflame@example.invalid"',
+        f"password_file = {quote(paths['runtime'] / 'secrets/smtp.password')}",
+        'from = "keepflame@example.invalid"',
+        'to = ["operator@example.invalid"]',
+        "timeout_seconds = 15",
+        "",
+    ])
     report = {"dry_run": True, "installed": False, "tasks_enabled": False, "execution_enabled": False,
               "timezone": "Asia/Shanghai", "commit": commit, "paths": {k: str(v) for k, v in paths.items()},
               "program_arguments": arguments, "automatic_restart": False,

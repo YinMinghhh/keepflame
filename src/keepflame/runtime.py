@@ -23,6 +23,7 @@ from keepflame.core.service import SchedulerService
 from keepflame.core.schedule import due_at
 from keepflame.core.protocols import AutomationPaused
 from keepflame.notifier import JsonlNotifier
+from keepflame.notifier.lifecycle import ConfigView, LifecycleNotifier
 from keepflame.storage import SQLiteStorage
 
 
@@ -33,6 +34,7 @@ class Runtime:
     notifier: JsonlNotifier
     orchestrator: Orchestrator
     service: SchedulerService
+    config_view: ConfigView | None = None
     owned_browser: BrowserPool | None = None
     login: LoginCoordinator | None = None
     configuration_blocked: bool = False
@@ -98,6 +100,8 @@ class Runtime:
                 for name in {flame.keeper for flame in updated.enabled_flames()}:
                     self.orchestrator.registry.resolve(name)
                 self.config = self.service.config = updated
+                if self.config_view is not None:
+                    self.config_view.config = updated
                 self.login.config = updated
                 if self.dispatch_owner is not None:
                     self.storage.refresh_dispatch(self.dispatch_owner, updated)
@@ -196,12 +200,16 @@ def build_runtime(
     delivery_notifier: Notifier | None = None,
     browser: IsolatedBrowser | OwnedBrowserSession | BrowserPool | None = None,
     restore_browser_session: bool = False,
+    mail_connect=None,
 ) -> Runtime:
     if restore_browser_session and browser is not None:
         raise ConfigError("browser session restoration requires the runtime-owned browser")
     config = load_config(config_path)
     storage = SQLiteStorage(config.storage.path)
     notifier = JsonlNotifier(stream)
+    config_view = ConfigView(config)
+    secrets = FileSecretResolver()
+    lifecycle = LifecycleNotifier(notifier, config_view, secrets, connect=mail_connect)
     clock = SystemClock()
     registry = EntryPointKeeperRegistry()
     for keeper_name in {flame.keeper for flame in config.enabled_flames()}:
@@ -214,8 +222,8 @@ def build_runtime(
         storage=storage,
         registry=registry,
         capabilities=CapabilityRegistry({"http": UrllibHttpClient(), "browser": browser_capability}),
-        secrets=FileSecretResolver(),
-        notifier=delivery_notifier if delivery_notifier is not None else notifier,
+        secrets=secrets,
+        notifier=delivery_notifier if delivery_notifier is not None else lifecycle,
         clock=clock,
     )
     service = SchedulerService(
@@ -232,6 +240,7 @@ def build_runtime(
         notifier=notifier,
         orchestrator=orchestrator,
         service=service,
+        config_view=config_view,
         owned_browser=owned_browser,
         login=login,
     )

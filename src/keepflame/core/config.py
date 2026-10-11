@@ -26,6 +26,21 @@ class StorageConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class EmailConfig:
+    """Optional SMTP delivery. Disabled configs never open a socket or secret."""
+
+    enabled: bool
+    host: str
+    port: int
+    security: str
+    username: str
+    password_file: Path
+    sender: str
+    recipients: tuple[str, ...]
+    timeout_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduleConfig:
     timezone: str
     first_check: time
@@ -60,6 +75,7 @@ class AppConfig:
     flames: tuple[FlameConfig, ...]
     source_path: Path
     source_fingerprint: str | None = None
+    email: EmailConfig | None = None
 
     def enabled_flames(self) -> tuple[FlameConfig, ...]:
         return tuple(flame for flame in self.flames if flame.enabled)
@@ -81,6 +97,12 @@ def _required_text(table: dict[str, Any], key: str, name: str) -> str:
     value = table.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{name}.{key} must be a non-empty string")
+    return value.strip()
+
+
+def _single_line(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or any(character.isspace() for character in value):
+        raise ConfigError(f"{name} must be a single-line value")
     return value.strip()
 
 
@@ -109,6 +131,69 @@ def _validate_json_value(value: Any, name: str) -> JsonValue:
     raise ConfigError(f"{name} must contain only JSON-compatible values")
 
 
+def _parse_email(raw: dict[str, Any]) -> EmailConfig | None:
+    if "notify" not in raw:
+        return None
+    notify = _expect_table(raw.get("notify"), "notify")
+    _reject_unknown(notify, {"email"}, "notify")
+    if "email" not in notify:
+        return None
+    table = _expect_table(notify.get("email"), "notify.email")
+    _reject_unknown(
+        table,
+        {
+            "enabled",
+            "host",
+            "port",
+            "security",
+            "username",
+            "password_file",
+            "from",
+            "to",
+            "timeout_seconds",
+        },
+        "notify.email",
+    )
+    enabled = table.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("notify.email.enabled must be true or false")
+    port = table.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ConfigError("notify.email.port must be an integer from 1 to 65535")
+    security = _single_line(table.get("security"), "notify.email.security")
+    if security not in {"starttls", "ssl", "none"}:
+        raise ConfigError("notify.email.security must be starttls, ssl, or none")
+    timeout = table.get("timeout_seconds", 15)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= float(timeout) <= 120:
+        raise ConfigError("notify.email.timeout_seconds must be a number from 1 to 120")
+    recipients_raw = table.get("to")
+    if not isinstance(recipients_raw, list) or not recipients_raw:
+        raise ConfigError("notify.email.to must list at least one address")
+    recipients = tuple(
+        _single_line(item, f"notify.email.to[{index}]")
+        for index, item in enumerate(recipients_raw)
+    )
+    password_raw = table.get("password_file")
+    if not isinstance(password_raw, str) or not password_raw.strip() or any(
+        character in password_raw for character in "\r\n"
+    ):
+        raise ConfigError("notify.email.password_file must be a single-line absolute path")
+    password_path = Path(password_raw.strip()).expanduser()
+    if not password_path.is_absolute():
+        raise ConfigError("notify.email.password_file must be an absolute path")
+    return EmailConfig(
+        enabled=enabled,
+        host=_single_line(table.get("host"), "notify.email.host"),
+        port=port,
+        security=security,
+        username=_single_line(table.get("username"), "notify.email.username"),
+        password_file=password_path,
+        sender=_single_line(table.get("from"), "notify.email.from"),
+        recipients=recipients,
+        timeout_seconds=float(timeout),
+    )
+
+
 def default_config_path() -> Path:
     return Path(os.environ.get("KEEPFLAME_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
 
@@ -127,7 +212,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {source}: {exc}") from exc
 
-    _reject_unknown(raw, {"storage", "flames"}, "top-level")
+    _reject_unknown(raw, {"storage", "flames", "notify"}, "top-level")
     storage_raw = _expect_table(raw.get("storage"), "storage")
     _reject_unknown(storage_raw, {"path"}, "storage")
     storage_text = _required_text(storage_raw, "path", "storage")
@@ -208,5 +293,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         flames=tuple(flames),
         source_path=source,
         source_fingerprint=hashlib.sha256(source_bytes).hexdigest(),
+        email=_parse_email(raw),
     )
 

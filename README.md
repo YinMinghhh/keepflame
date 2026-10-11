@@ -2,7 +2,7 @@
 
 KeepFlame 为不同网站的日常任务保留统一的调度、状态、人工介入和历史。聚宽插件有 `inspect`（只读查询）和 `browser`（专用浏览器）模式；签到 `task="checkin"` 与阅读积分 `task="reading"` 是两个独立 Flame，共用账号会话。
 
-**默认不执行。** `run`、`run-once`、`login`、`resume`、`reload` 不带 `--execute` 时只校验配置并输出计划，不开数据库、浏览器或凭据文件；省略 `enabled` 也默认为关闭。所有发布样例停用，邮件功能本轮暂停，现有通知仅写 stdout JSONL。
+**默认不执行。** `run`、`run-once`、`login`、`resume`、`reload` 不带 `--execute` 时只校验配置并输出计划，不开数据库、浏览器或凭据文件；省略 `enabled` 也默认为关闭。所有发布样例停用。邮箱通知渠道已接入，默认关闭，不连接真实邮箱；未启用时通知只写 stdout JSONL。
 
 ## 已验证到哪一层
 
@@ -90,7 +90,7 @@ SIGTERM/Ctrl-C 停止领取新任务，等待本轮有界流程完成并关闭�
 
 SQLite schema v4 从 v1/v2/v3 事务迁移，保留动作、暂停、登录请求和执行历史，新增 daemon owner 与单次运行请求。交接客户端只接受已存在的 v4 库，不创建或迁移数据库；旧服务必须在后续获准升级时采用新代码。本轮开发只迁移新建合成库。回退源码前先核对数据库兼容性；不要恢复旧状态快照后直接重新领取。浏览器凭据与图片均不打包。挑战图片只在内存中处理，不写截图/HAR/视频；持久 profile 的其他浏览器缓存并未承诺完全为空。
 
-通知保持现有 stdout JSONL/有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟，错误只记类型；这不是邮件投递。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
+通知保持 stdout JSONL 和有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟，错误只记类型。可选邮箱渠道使用同一 outbox，默认关闭，不连接真实邮箱。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
 
 更多细节见 [聚宽接入](src/keepflame/flames/joinquant/README.md) 和 [请求协议及预算](src/keepflame/flames/joinquant/PROTOCOL.md)。本机技术验证不代表平台许可，真实操作范围仍需独立确认。
 
