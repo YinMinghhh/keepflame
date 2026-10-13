@@ -43,7 +43,7 @@ def test_list_follows_legacy_article_and_rejects_bad_entries():
     with pytest.raises(TaskConfigurationError):
         task_from_settings({"task": "reading", "article_urls": [A], "reading_scroll": "yes"})
     with pytest.raises(TaskConfigurationError):
-        task_from_settings({"task": "reading"})
+        task_from_settings({"task": "reading", "reading_discovery": False})
 
 
 def test_choose_skips_read_articles_and_exhausts_without_repeat():
@@ -81,7 +81,8 @@ def run(settings, storage, results):
     return result, gateway, seen.get("task")
 
 
-SETTINGS = {"task": "reading", "article_urls": [A, B, C], "browser_profile_dir": "/unused-synthetic", "mode": "browser"}
+SETTINGS = {"task": "reading", "article_urls": [A, B, C], "browser_profile_dir": "/unused-synthetic", "mode": "browser",
+            "reading_discovery": False}
 
 
 def test_daily_run_reads_first_unread_article_and_records_it():

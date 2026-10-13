@@ -47,6 +47,21 @@ class ControlStorageMixin:
             keeper TEXT NOT NULL, account_id TEXT NOT NULL, article_id TEXT NOT NULL,
             day TEXT NOT NULL, read_at TEXT NOT NULL,
             PRIMARY KEY(keeper, account_id, article_id))""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS reading_discovery (
+            keeper TEXT NOT NULL, account_id TEXT NOT NULL, top_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL, PRIMARY KEY(keeper, account_id))""")
+
+    def discovery_top(self, keeper, account_id):
+        with self._connect() as connection:
+            row = connection.execute("SELECT top_id FROM reading_discovery WHERE keeper=? AND account_id=?",
+                                     (keeper, account_id)).fetchone()
+        return int(row["top_id"]) if row is not None else None
+
+    def remember_discovery_top(self, keeper, account_id, top_id, now):
+        with self._connect() as connection:
+            connection.execute("""INSERT INTO reading_discovery VALUES (?,?,?,?)
+                ON CONFLICT(keeper, account_id) DO UPDATE SET top_id=excluded.top_id, updated_at=excluded.updated_at""",
+                               (keeper, account_id, int(top_id), stamp(now)))
 
     def read_article_ids(self, keeper, account_id):
         with self._connect() as connection:

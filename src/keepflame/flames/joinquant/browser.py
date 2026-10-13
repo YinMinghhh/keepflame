@@ -15,7 +15,8 @@ from keepflame.core.models import HumanAction, KeepResult, KeepStatus, Reward, R
 from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper, _unique_json_object
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
 from keepflame.flames.joinquant.guard import CHALLENGE_PATH, READING_PATH, FlowError, SignInGuard
-from keepflame.flames.joinquant.task import TaskConfigurationError, choose_article, task_from_settings
+from keepflame.flames.joinquant.task import TaskConfigurationError, article_url, choose_article, task_from_settings
+from keepflame.flames.joinquant.discovery import discover as discover_article
 from keepflame.flames.joinquant.day import BusinessDayFence
 from keepflame.core.models import CompletionReceipt
 from keepflame.flames.joinquant.history import credit_evidence, fetch_credit_history
@@ -328,7 +329,9 @@ class JoinQuantPage:
 
 class JoinQuantBrowserKeeper:
     business_timezone = "Asia/Shanghai"
-    def __init__(self, *, page_factory=JoinQuantPage, solver=solve_challenge, sleeper=time.sleep):
+    def __init__(self, *, page_factory=JoinQuantPage, solver=solve_challenge, sleeper=time.sleep,
+                 discoverer=discover_article):
+        self.discoverer = discoverer
         self.page_factory = page_factory
         self.solver = solver
         self.sleep = sleeper
@@ -388,6 +391,20 @@ class JoinQuantBrowserKeeper:
         return replace(stopped, metadata=metadata,
                        next_action_at=max(stopped.next_action_at, observation.next_action_at or context.now)
                        if observation else stopped.next_action_at)
+
+    def _discover(self, context, task, seen):
+        """Anonymous, read-only fallback once the configured list is used up."""
+        top = getattr(context.storage, "discovery_top", None)
+        start = top("joinquant", context.account_id) if callable(top) else None
+        found = self.discoverer(set(seen) | {i for _, i in task.article_candidates}, start=start,
+                                max_requests=task.discovery_max_requests)
+        remember = getattr(context.storage, "remember_discovery_top", None)
+        if found.top_id is not None and callable(remember):
+            remember("joinquant", context.account_id, found.top_id, context.now)
+        if found.article_id is None:
+            reason = "reading_discovery_unavailable" if found.reason == "network" else "reading_articles_exhausted"
+            return task, reason
+        return replace(task, article_url=article_url(found.article_id), article_id=found.article_id), None
 
     @staticmethod
     def _remember_article(context, gateway, task, day):
@@ -472,7 +489,16 @@ class JoinQuantBrowserKeeper:
         if task.name == "reading" and before.metadata.get("reading_state") == "needs_reading":
             if task.article_id is None:
                 # Every configured article was already read. Never repeat one.
-                return self._stop(context, "reading_articles_exhausted", human=True)
+                if not task.discovery:
+                    return self._stop(context, "reading_articles_exhausted", human=True)
+                # Only now, when a read is really needed, look for a fresh article.
+                reader = getattr(context.storage, "read_article_ids", None)
+                task, problem = self._discover(context, task, reader("joinquant", context.account_id)
+                                               if callable(reader) else set())
+                if problem is not None:
+                    return self._stop(context, problem, human=True)
+                if hasattr(gateway, "task"):
+                    gateway.task = task
             # Article JavaScript can itself create eligibility. Journal before it runs.
             if not reserve("reading"):
                 return self._unconfirmed(context, before, cause="action_reservation_rejected")
@@ -533,6 +559,9 @@ class JoinQuantBrowserKeeper:
         if not isinstance(profile, str) or not profile or type(headless_setting) is not bool:
             return self._stop(context, "browser_configuration", human=True)
         deadline = time.monotonic() + 60 + (task.wait_seconds if task.name == "reading" else 0)
+        if task.name == "reading" and task.article_id is None and task.discovery:
+            # Room for the paced anonymous probes that may run before reading.
+            deadline += task.discovery_max_requests + 10
         fence = BusinessDayFence(context)
         gateway = None
         completed = None

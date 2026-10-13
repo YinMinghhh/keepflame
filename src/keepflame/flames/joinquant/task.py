@@ -26,6 +26,9 @@ class Task:
     # Ordered (url, id) candidates. A day reads the first one never read before.
     article_candidates: tuple = ()
     scroll: bool = True
+    # Fallback when every configured article was read.
+    discovery: bool = True
+    discovery_max_requests: int = 30
 
 
 def _article(url):
@@ -50,7 +53,11 @@ def task_from_settings(settings) -> Task:
         if not isinstance(many, list) or not many or len(many) > MAX_ARTICLE_CANDIDATES:
             raise TaskConfigurationError("reading_configuration")
         urls.extend(many)
-    if not urls:
+    discovery = settings.get("reading_discovery", True)
+    budget = settings.get("reading_discovery_max_requests", 30)
+    if type(discovery) is not bool or type(budget) is not int or not 5 <= budget <= 60:
+        raise TaskConfigurationError("reading_configuration")
+    if not urls and not discovery:
         raise TaskConfigurationError("reading_configuration")
     candidates = tuple(_article(url) for url in urls)
     if len({article_id for _, article_id in candidates}) != len(candidates):
@@ -61,9 +68,13 @@ def task_from_settings(settings) -> Task:
     scroll = settings.get("reading_scroll", True)
     if type(scroll) is not bool:
         raise TaskConfigurationError("reading_configuration")
-    url, article_id = candidates[0]
+    url, article_id = candidates[0] if candidates else (None, None)
     return Task("reading", "post_view", "CLAIM_OFFICIAL_READING_REWARD", "立即领取", "浏览社区文章",
-                url, article_id, wait, candidates, scroll)
+                url, article_id, wait, candidates, scroll, discovery, budget)
+
+
+def article_url(article_id) -> str:
+    return f"https://www.joinquant.com/view/community/detail/{int(article_id)}"
 
 
 def choose_article(task: Task, read_ids) -> Task:

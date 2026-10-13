@@ -53,6 +53,12 @@ class MemoryStorage:
         self.notifications: dict[tuple[str, str], PendingNotification] = {}
         self.articles: dict[tuple[str, str], dict[str, str]] = {}
 
+    def discovery_top(self, keeper, account_id):
+        return getattr(self, "tops", {}).get((keeper, account_id))
+
+    def remember_discovery_top(self, keeper, account_id, top_id, now):
+        self.tops = {**getattr(self, "tops", {}), (keeper, account_id): top_id}
+
     def read_article_ids(self, keeper, account_id):
         return set(self.articles.get((keeper, account_id), {}))
 
