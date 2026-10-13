@@ -162,3 +162,29 @@ def test_real_opener_turns_a_refused_redirect_into_a_classified_302(monkeypatch)
         return reply
     monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", https_open)
     assert disc.anonymous_probe(81500) == "question"
+
+
+def test_config_without_any_article_uses_discovery_only():
+    import tests.test_reading_rotation as rotation
+    storage = RotationStorage()
+    settings = {"task": "reading", "browser_profile_dir": "/unused", "mode": "browser"}
+    calls = []
+    def fake(excluded, *, start, max_requests):
+        calls.append(excluded)
+        return Discovery("81601", 81596, 17, "found")
+    original = rotation.JoinQuantBrowserKeeper
+    rotation.JoinQuantBrowserKeeper = lambda **kw: original(discoverer=fake, **kw)
+    try:
+        result, page, task = run(settings, storage, [reading(), reading({"status": 0, "totalCount": 1}),
+                                                     reading({"status": 1})])
+    finally:
+        rotation.JoinQuantBrowserKeeper = original
+    assert result.status is KeepStatus.SUCCESS and page.reads == 1 and len(calls) == 1
+    assert [a for a, _ in storage.recorded] == ["81601"]
+
+
+def test_generated_server_config_has_no_fixed_article():
+    from pathlib import Path
+    text = Path("deploy/keepflame.server.toml.example").read_text()
+    assert "reading_discovery = true" in text
+    assert "article_url" not in text

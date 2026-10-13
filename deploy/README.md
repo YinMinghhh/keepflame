@@ -31,7 +31,7 @@ python3.13 -I -B deploy/prepare.py plan \
   --write --out /absolute/review-area/new-server-plan
 ```
 
-`/Users/keepflame` 只是待确认的运行用户示例。生成操作不会访问这个 home，也不会建运行目录；不能把 `--out` 指向安装、运行或既有证据目录。配置包含两个独立 Flame，签到保留 `joinquant-primary`，阅读为 `joinquant-reading-primary`，均 `enabled=false`，使用同一服务器自有账号 profile。阅读的 `article_url` 留空，需审查具体公开文章后再配置；不会自动挑文章或假定停留 6 秒即可领取。
+`/Users/keepflame` 只是待确认的运行用户示例。生成操作不会访问这个 home，也不会建运行目录；不能把 `--out` 指向安装、运行或既有证据目录。配置包含两个独立 Flame，签到保留 `joinquant-primary`，阅读为 `joinquant-reading-primary`，均 `enabled=false`，使用同一服务器自有账号 profile。阅读不配置固定文章，默认用匿名只读自动发现选文（`reading_discovery = true`）；`article_url`/`article_urls` 仅作可选兼容、不推荐。不会假定停留 6 秒即可领取。
 
 目录分工：
 
