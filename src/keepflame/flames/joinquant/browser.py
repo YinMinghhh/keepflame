@@ -14,8 +14,8 @@ from keepflame.capabilities.http import HttpResponse
 from keepflame.core.models import HumanAction, KeepResult, KeepStatus, Reward, RewardSource
 from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper, _unique_json_object
 from keepflame.flames.joinquant.matching import MatchError, solve_challenge
-from keepflame.flames.joinquant.guard import CHALLENGE_PATH, FlowError, SignInGuard
-from keepflame.flames.joinquant.task import TaskConfigurationError, task_from_settings
+from keepflame.flames.joinquant.guard import CHALLENGE_PATH, READING_PATH, FlowError, SignInGuard
+from keepflame.flames.joinquant.task import TaskConfigurationError, choose_article, task_from_settings
 from keepflame.flames.joinquant.day import BusinessDayFence
 from keepflame.core.models import CompletionReceipt
 from keepflame.flames.joinquant.history import credit_evidence, fetch_credit_history
@@ -59,6 +59,12 @@ def _safe_credit(before, after, task, started_at):
         return credit_evidence(before, after, task=task, started_at=started_at)
     except Exception:
         return {"proven": False, "amount": None}
+
+
+SCROLL_START_SECONDS = 2.0
+SCROLL_INTERVAL_SECONDS = 0.75
+SCROLL_STEP_PIXELS = 400
+SCROLL_STEPS = 30
 
 
 class JoinQuantPage:
@@ -122,11 +128,19 @@ class JoinQuantPage:
         response = self.page.goto(self.task.article_url, wait_until="domcontentloaded", timeout=self.timeout())
         if response is None or response.status != 200 or self.page.url != self.task.article_url:
             raise FlowError("article_navigation_changed", response.status if response is not None else None)
-        until = time.monotonic() + self.task.wait_seconds
+        started = time.monotonic()
+        until = started + self.task.wait_seconds
+        mouse = getattr(self.page, "mouse", None) if self.task.scroll else None
+        next_scroll, scrolls = started + SCROLL_START_SECONDS, 0
         while time.monotonic() < until:
             self.guard.check()
             if self.page.is_closed() or self.page.url != self.task.article_url:
                 raise FlowError("article_navigation_changed")
+            if mouse is not None and scrolls < SCROLL_STEPS and time.monotonic() >= next_scroll:
+                # One slow pass toward the bottom with ordinary wheel input.
+                mouse.wheel(0, SCROLL_STEP_PIXELS)
+                scrolls += 1
+                next_scroll += SCROLL_INTERVAL_SECONDS
             self.page.wait_for_timeout(min(250, max(1, int((until-time.monotonic())*1000))))
         self.guard.check()
         if not self.guard.article_allowed or self.guard.counts["/community/post/postView"] != 1:
@@ -375,6 +389,16 @@ class JoinQuantBrowserKeeper:
                        next_action_at=max(stopped.next_action_at, observation.next_action_at or context.now)
                        if observation else stopped.next_action_at)
 
+    @staticmethod
+    def _remember_article(context, gateway, task, day):
+        """Record an article once its registration request left the page."""
+        counts = getattr(getattr(gateway, "guard", None), "counts", None)
+        if counts is not None and not counts.get(READING_PATH):
+            return
+        record = getattr(context.storage, "record_article_read", None)
+        if callable(record) and task.article_id is not None:
+            record("joinquant", context.account_id, task.article_id, day, context.now)
+
     def _run(self, context, gateway, task, progress, fence=None):
         fence = fence or BusinessDayFence(context)
         day = fence.day
@@ -438,10 +462,16 @@ class JoinQuantBrowserKeeper:
             return True
 
         if task.name == "reading" and before.metadata.get("reading_state") == "needs_reading":
+            if task.article_id is None:
+                # Every configured article was already read. Never repeat one.
+                return self._stop(context, "reading_articles_exhausted", human=True)
             # Article JavaScript can itself create eligibility. Journal before it runs.
             if not reserve("reading"):
                 return self._unconfirmed(context, before, cause="action_reservation_rejected")
-            invoke(gateway.read_article)
+            try:
+                invoke(gateway.read_article)
+            finally:
+                self._remember_article(context, gateway, task, day)
             before = inspect()
             if before.status is KeepStatus.SUCCESS:
                 return complete(before, True)
@@ -487,6 +517,9 @@ class JoinQuantBrowserKeeper:
             task = task_from_settings(context.settings)
         except TaskConfigurationError as exc:
             return self._stop(context, str(exc), human=True)
+        if task.name == "reading":
+            reader = getattr(context.storage, "read_article_ids", None)
+            task = choose_article(task, reader("joinquant", context.account_id) if callable(reader) else ())
         profile = context.settings.get("browser_profile_dir")
         headless_setting = context.settings.get("browser_headless", True)
         if not isinstance(profile, str) or not profile or type(headless_setting) is not bool:

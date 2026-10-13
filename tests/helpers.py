@@ -51,6 +51,13 @@ class MemoryStorage:
         self.states: dict[tuple[str, str], FlameState] = {}
         self.runs: list[RunRecord] = []
         self.notifications: dict[tuple[str, str], PendingNotification] = {}
+        self.articles: dict[tuple[str, str], dict[str, str]] = {}
+
+    def read_article_ids(self, keeper, account_id):
+        return set(self.articles.get((keeper, account_id), {}))
+
+    def record_article_read(self, keeper, account_id, article_id, day, now):
+        self.articles.setdefault((keeper, account_id), {}).setdefault(str(article_id), day)
 
     def get_action(self, keeper, account_id, task):
         return self.actions.get((keeper, account_id, task))
