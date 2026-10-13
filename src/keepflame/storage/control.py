@@ -42,6 +42,24 @@ class ControlStorageMixin:
         connection.execute("""CREATE TABLE IF NOT EXISTS runtime_commands (
             id TEXT PRIMARY KEY, command TEXT NOT NULL CHECK(command='reload'),
             state TEXT NOT NULL, created_at TEXT NOT NULL, error_type TEXT)""")
+        # Additive table: older code ignores it, so no schema version bump.
+        connection.execute("""CREATE TABLE IF NOT EXISTS reading_articles (
+            keeper TEXT NOT NULL, account_id TEXT NOT NULL, article_id TEXT NOT NULL,
+            day TEXT NOT NULL, read_at TEXT NOT NULL,
+            PRIMARY KEY(keeper, account_id, article_id))""")
+
+    def read_article_ids(self, keeper, account_id):
+        with self._connect() as connection:
+            rows = connection.execute("SELECT article_id FROM reading_articles WHERE keeper=? AND account_id=?",
+                                      (keeper, account_id)).fetchall()
+        return {row["article_id"] for row in rows}
+
+    def record_article_read(self, keeper, account_id, article_id, day, now):
+        if date.fromisoformat(day).isoformat() != day:
+            raise ValueError("article day must be an ISO calendar date")
+        with self._connect() as connection:
+            connection.execute("INSERT OR IGNORE INTO reading_articles VALUES (?,?,?,?,?)",
+                               (keeper, account_id, str(article_id), day, stamp(now)))
 
     def request_reload(self, now):
         identifier = str(uuid4())
