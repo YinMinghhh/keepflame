@@ -392,8 +392,12 @@ class JoinQuantBrowserKeeper:
     @staticmethod
     def _remember_article(context, gateway, task, day):
         """Record an article once its registration request left the page."""
-        counts = getattr(getattr(gateway, "guard", None), "counts", None)
-        if counts is not None and not counts.get(READING_PATH):
+        guard = getattr(gateway, "guard", None)
+        counts = getattr(guard, "counts", None)
+        # A paid or unknown article never registers; remember it so the next
+        # run moves on instead of stopping on the same candidate forever.
+        unsupported = getattr(getattr(guard, "failure", None), "reason", None) == "article_not_supported"
+        if counts is not None and not counts.get(READING_PATH) and not unsupported:
             return
         record = getattr(context.storage, "record_article_read", None)
         if callable(record) and task.article_id is not None:

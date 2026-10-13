@@ -1,5 +1,6 @@
 """Daily article rotation, read history and the slow scroll; no external I/O."""
 
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -173,3 +174,37 @@ def test_read_article_scrolls_slowly_downward_only_when_enabled(monkeypatch, scr
         assert all(dx == 0 and dy > 0 for dx, dy in page.wheels)
     else:
         assert page.wheels == []
+
+
+class UnsupportedGateway(Gateway):
+    def __init__(self, results, storage, reason):
+        super().__init__(results, storage)
+        self.guard = SimpleNamespace(counts=Counter(),
+                                     failure=SimpleNamespace(reason=reason, blocked_request=None))
+    def read_article(self):
+        from keepflame.flames.joinquant.guard import FlowError
+        raise FlowError(self.guard.failure.reason)
+
+
+def _run_with(gateway, storage):
+    @contextmanager
+    def browser(**kwargs):
+        yield object()
+    context = KeeperContext("reading", "synthetic", SETTINGS, CapabilityRegistry({"browser": SimpleNamespace(open=browser)}),
+                            StaticSecrets(AssertionError("no credentials")), storage, local(11, 9))
+    return JoinQuantBrowserKeeper(page_factory=lambda *a, **k: gateway, solver=lambda *_: Match(90, 0, .99, .4),
+                                  sleeper=lambda _: None).keep(context)
+
+
+def test_unsupported_article_is_remembered_so_next_run_moves_on():
+    storage = RotationStorage()
+    result = _run_with(UnsupportedGateway([reading()], storage, "article_not_supported"), storage)
+    assert result.status is not KeepStatus.SUCCESS
+    assert [a for a, _ in storage.recorded] == ["111"]
+    assert choose_article(task_from_settings(SETTINGS), storage.read).article_id == "222"
+
+
+def test_other_failures_before_registration_are_not_remembered():
+    storage = RotationStorage()
+    _run_with(UnsupportedGateway([reading()], storage, "article_navigation_changed"), storage)
+    assert storage.recorded == []
