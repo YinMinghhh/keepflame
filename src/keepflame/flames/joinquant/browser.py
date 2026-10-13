@@ -444,7 +444,11 @@ class JoinQuantBrowserKeeper:
         if before.status is KeepStatus.SUCCESS:
             return complete(before, False)
         if action is not None and action.state == "pending" and not released:
-            return self._unconfirmed(context, before)
+            retry = getattr(context.storage, "zero_claim_pending_retryable", None)
+            same_day_retry = (action.day == day and callable(retry)
+                              and retry("joinquant", context.account_id, task.name, day))
+            if not same_day_retry:
+                return self._unconfirmed(context, before)
         if action is not None and action.state == "confirmed" and action.day == day:
             return self._unconfirmed(context, before, cause="same_day_action_consumed")
         if before.status is not KeepStatus.WAITING_HUMAN or before.human_action.kind not in {

@@ -53,6 +53,23 @@ def zero_claim_pending_allows_new_day(action_day: object, state: object, metadat
     )
 
 
+def zero_claim_pending_allows_retry(action_day: object, state: object, metadata: object, today: object) -> bool:
+    """Like the next-day rule, but the same business day may also retry.
+
+    Only a pending that sent no challenge, answer, or claim qualifies. Any
+    submitted write, or a missing claim count, keeps the duplicate guard.
+    """
+    return (
+        state == "pending"
+        and isinstance(action_day, str)
+        and isinstance(today, str)
+        and action_day <= today
+        and claim_count(metadata) == 0
+        and _unsubmitted(metadata, "challenge")
+        and _unsubmitted(metadata, "answer")
+    )
+
+
 def execution_paused(storage, keeper: str, account_id: str, flame_id: str, *, now) -> bool:
     """Whether this Flame should be skipped. Storage without the newer check stays strict."""
     checker = getattr(storage, "blocks_execution", None)

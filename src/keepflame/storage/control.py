@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from keepflame.core.eligibility import zero_claim_pending_allows_new_day
+from keepflame.core.eligibility import zero_claim_pending_allows_new_day, zero_claim_pending_allows_retry
 from keepflame.core.models import ActionAttempt
 
 
@@ -99,14 +99,18 @@ class ControlStorageMixin:
                 validate_time()
             if row is not None:
                 abandoned = self._abandoned(connection, row)
-                blocked_day = row['day'] >= day
                 pending_block = row['state'] == 'pending' and (abandoned is None or day < abandoned['business_day'])
                 # An archive, including unknown, keeps the old write blocked.
-                # Only an unarchived pending with no challenge, answer, or claim can move.
-                if pending_block and not blocked_day and abandoned is None and not self._has_archive(connection, row):
-                    metadata = self._metadata_for_action(connection, row)
-                    if zero_claim_pending_allows_new_day(row['day'], row['state'], metadata, day):
-                        pending_block = False
+                # Only an unarchived pending with no challenge, answer, or claim can move,
+                # on a later day or again on its own day. Re-stamping links the
+                # new attempt, so a claim it sends blocks any further retry.
+                retryable = (row['state'] == 'pending' and row['day'] <= day and abandoned is None
+                             and not self._has_archive(connection, row)
+                             and zero_claim_pending_allows_retry(
+                                 row['day'], row['state'], self._metadata_for_action(connection, row), day))
+                blocked_day = row['day'] > day or (row['day'] == day and not retryable)
+                if retryable:
+                    pending_block = False
                 if blocked_day or pending_block:
                     return False
             connection.execute("""INSERT INTO action_attempts VALUES (?,?,?,'pending',?,?,NULL)
@@ -164,6 +168,19 @@ class ControlStorageMixin:
             self.resume(keeper, account_id, flame_id)
             return False
         return True
+
+    def zero_claim_pending_retryable(self, keeper, account_id, task, day) -> bool:
+        """Same-day pending that sent nothing may be read or claimed again."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM action_attempts WHERE keeper=? AND account_id=? AND task=?",
+                (keeper, account_id, task)).fetchone()
+            if row is None or row["state"] != "pending" or row["day"] != day:
+                return False
+            if self._has_archive(connection, row) or self._abandoned(connection, row) is not None:
+                return False
+            metadata = self._metadata_for_action(connection, row)
+        return zero_claim_pending_allows_retry(row["day"], row["state"], metadata, day)
 
     def zero_claim_pending_released(self, keeper, account_id, task, day) -> bool:
         with self._connect() as connection:

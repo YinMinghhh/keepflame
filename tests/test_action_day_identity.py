@@ -234,8 +234,9 @@ def test_same_day_and_missing_count_and_account_pause_stay_blocked(tmp_path):
     same_day = SQLiteStorage(tmp_path / 'same-day.sqlite3')
     _seed_checkin(same_day, 0)
     assert execution_paused(same_day, 'joinquant', 'primary', 'joinquant-primary', now=STARTED) is True
-    assert same_day.reserve_action('joinquant', 'primary', 'checkin', '2026-10-10', STARTED) is False
-    print('observation same_day_zero_claim_stays_blocked=true')
+    # Approved rule: a same-day pending that sent nothing may be re-reserved.
+    assert same_day.reserve_action('joinquant', 'primary', 'checkin', '2026-10-10', STARTED + timedelta(minutes=1)) is True
+    print('observation same_day_zero_claim_retry_allowed=true')
 
     missing = SQLiteStorage(tmp_path / 'missing.sqlite3')
     _seed_checkin(missing, 0, record_run=False)
