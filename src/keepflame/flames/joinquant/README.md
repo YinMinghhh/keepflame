@@ -12,8 +12,11 @@
 [flames.settings]
 mode = "browser"
 task = "reading"
-article_url = "https://www.joinquant.com/view/community/detail/12345"
-reading_wait_seconds = 30
+article_urls = ["https://www.joinquant.com/view/community/detail/12345"]
+reading_wait_seconds = 50          # 30–120，默认 50
+reading_scroll = true              # 等待中一次缓慢向下滚动
+reading_discovery = true           # 列表读完后匿名自动发现，默认开启
+reading_discovery_max_requests = 30  # 5–60
 # browser_profile_dir 指向运行主机本机独立登录的专用目录
 ```
 
@@ -65,3 +68,9 @@ abandoned 不自动恢复 Flame、不改变启用开关，也不跳过下一日�
 所有 JoinQuant abandoned 审查入口先按预留身份（keeper/account/task/day/started_at）或 run UUID 的固定摘要识别该案例，再解释 reason；任一身份命中都必须通过完整原始行和证据校验。引用该案例的专属证书也强制进入完整校验，不能把它移用于另一个旧通用案例。修改 reason 为旧白名单值、改变状态或替换证据不能退回旧通用分支。与该 intent、run 和专属证书均无关的合法普通案例仍按原规则审查，unknown 仍不释放预算。
 
 业务时区声明固定为 Asia/Shanghai，与 Flame 调度不一致时入口停止。完成后查和动作事务确认成功时即返回本轮 Core 签发的成功回执；回执保留原目标日期和观察时刻，随后 close 或上下文退出跨过午夜不能把它记作次日成功。清理实际抛错时保留成功回执，同时因资源问题暂停；仅日期变化不会在已完成后改成 unknown 或要求登录。确认前仍逐阶段执行实时日期围栏，SQL 确认中日期改变仍回滚，不放宽写请求守卫。
+
+## 文章轮换与自动发现
+
+每天选 `article_url`（旧写法，排在最前）与 `article_urls` 中第一篇从未读过的文章；`postView` 一旦发出，或文章被判为付费/未知类型，即写入 `reading_articles`，以后不再选它。
+
+列表读完且 `reading_discovery = true` 时，只在当天确实需要阅读时才自动发现：用不带 Cookie、不跟随跳转的匿名 `GET https://www.joinquant.com/post/<数字ID>` 读取跳转目标。跳到 `/view/community/detail/<32位哈希>` 且无 query 的视为普通文章；带 `?type=` 的问答帖、404 和未知目标都跳过。先从缓存的最大 ID（`reading_discovery`，首次默认 81500）向上倍增、再二分估计当前最大 ID，然后向回找第一篇未读文章。请求数受 `reading_discovery_max_requests` 限制，间隔 0.5 秒。发现不经过账号浏览器和写门禁，也不登记或领取；选中的文章仍走原有的类型检查与阅读流程。网络失败停在 `reading_discovery_unavailable`、找不到停在 `reading_articles_exhausted`，均需要人工处理并通知，不重复读旧文章。

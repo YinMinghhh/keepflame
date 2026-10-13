@@ -42,6 +42,11 @@ browser_profile_dir = "/Users/keepflame/Library/Application Support/KeepFlame/pr
 browser_headless = false
 # Add one reviewed public numeric article URL only after live observation is authorized.
 # article_url = "https://www.joinquant.com/view/community/detail/123456"
+# article_urls = ["https://www.joinquant.com/view/community/detail/123456"]
+# reading_wait_seconds = 50
+# reading_scroll = true
+# reading_discovery = true
+# reading_discovery_max_requests = 30
 
 # Email delivery exists and stays off. This candidate is not a live mailbox.
 [notify.email]

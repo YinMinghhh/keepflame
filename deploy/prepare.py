@@ -373,6 +373,11 @@ def render_plan(server_home: Path, commit: str) -> tuple[dict[str, object], dict
             config.extend([
                 "# Add one reviewed public numeric article URL only after live observation is authorized.",
                 '# article_url = "https://www.joinquant.com/view/community/detail/123456"',
+                '# article_urls = ["https://www.joinquant.com/view/community/detail/123456"]',
+                '# reading_wait_seconds = 50',
+                '# reading_scroll = true',
+                '# reading_discovery = true',
+                '# reading_discovery_max_requests = 30',
             ])
         config.append("")
     config.extend([
