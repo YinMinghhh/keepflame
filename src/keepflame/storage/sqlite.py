@@ -7,6 +7,7 @@ import fcntl
 from contextlib import contextmanager
 from dataclasses import asdict
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -118,13 +119,20 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3.Connection's own context manager only commits/rolls back; it never
+        # closes. Close explicitly so a long-running daemon does not leak descriptors.
         connection = (sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True, timeout=5.0)
                       if self.existing_only else sqlite3.connect(self.path, timeout=5.0))
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         try:
