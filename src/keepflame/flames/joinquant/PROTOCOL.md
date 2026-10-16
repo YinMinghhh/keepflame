@@ -76,7 +76,7 @@
 
 文章组件同一公开构建的 created() 无条件调用 getAllAlgorithm()，由 axios POST `/algorithm/index/runList`，失败已由该方法的空 catch 消化。该请求不属于阅读资格或领取协议，KeepFlame 始终在本地 abort，不 fetch、不 fallback、不伪造响应。仅 reading 阶段、article_navigation=1、当前文章的原任务主 frame、精确 HTTPS 官方 URL（无 query/fragment）、空 body、xhr/fetch 的第一次 POST 可在阻断后继续本轮；次数记入 blocked_algorithm_list。重复及任何范围变化仍触发 unexpected_write，未识别的写请求也仍停止。
 
-首次导致停止的请求以 blocked_request 保留固定枚举和布尔值，抓取发生在 phase 变为 stopped 之前。字段为 method、origin、endpoint、phase、resource_type、frame、has_query、has_fragment；endpoint 仅映射源码内审核过的公开路径，未知路径记 unknown。诊断不访问请求 header/body，不记录账号标识、原始路径、查询参数或凭据值；正常的非致命 GET/附带 POST 阻断不会抢占首个致命错误。后续请求、response 处理或页面关闭不能替换该证据。这一字段可诊断未来获准运行，不能恢复此前未记录的实录路径。
+首次导致停止的请求以 blocked_request 保留固定枚举和布尔值，抓取发生在 phase 变为 stopped 之前。字段为 method、origin、endpoint、phase、resource_type、frame、has_query、has_fragment、path；path 仅在官方 origin 时记录脱敏后的裸路径（无 scheme/host/query/body，纯数字段记 :id，其余（含数字混排、下划线）记 :x，最多 8 段），其他 origin 为 null；endpoint 仅映射源码内审核过的公开路径，未知路径记 unknown。诊断不访问请求 header/body，不记录账号标识、原始路径、查询参数或凭据值；正常的非致命 GET/附带 POST 阻断不会抢占首个致命错误。后续请求、response 处理或页面关闭不能替换该证据。这一字段可诊断未来获准运行，不能恢复此前未记录的实录路径。
 
 动作记录在自然阅读登记之前或领取挑战之前 reserve。pending 跨日阻断新动作；已确认当日也阻断重复尝试。未知完成返回 claim_unconfirmed，明确要求人工检查；普通恢复不清除动作记录，只有后端完成才能 confirm。所有退出路径关闭任务页再移除本轮 handler，不关闭整个账号 context。图像只在内存，Pillow 对象 finally 关闭；浏览器缓存的剩余边界不作无落盘保证。
 

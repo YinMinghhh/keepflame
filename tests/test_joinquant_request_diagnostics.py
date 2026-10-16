@@ -98,6 +98,7 @@ def test_unknown_write_remains_fatal_after_optional_post_and_first_failure_survi
     assert first.blocked_request == {
         "method": "POST", "origin": "official", "endpoint": "unknown", "phase": "reading",
         "resource_type": "fetch", "frame": "main_task", "has_query": True, "has_fragment": True,
+        "path": "/:x",
     }
     later = algorithm_list(guard, page)
     guard.route(later)
@@ -160,3 +161,34 @@ def test_first_request_failure_reaches_keeper_cli_and_jsonl_after_gate_cleanup()
         account_id="synthetic", result=result, occurred_at=now)
     assert json.loads(stream.getvalue())["metadata"]["blocked_request"] == output["metadata"]["blocked_request"]
     assert "SYNTHETIC_PRIVATE" not in json.dumps(output) + stream.getvalue()
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("/default/index/GetSquareList", "/default/index/GetSquareList"),
+    ("/community/post/NeedSubmitCode", "/community/post/NeedSubmitCode"),
+    ("/view/community/detail/81756", "/view/community/detail/:id"),
+    ("/user/12345/SYNTHETIC_PRIVATE", "/user/:id/:x"),
+    ("/a1b2c3d4e5f6/token", "/:x/token"),
+    ("/x" * 10, "/x/x/x/x/x/x/x/x/..."),
+    ("/" + "a" * 41, "/:x"),
+    ("/", "/"),
+])
+def test_unknown_official_write_records_only_sanitized_bare_path(path, expected):
+    guard, page, _ = reading_guard()
+    route = Route(Reply(), url=JOINQUANT_ORIGIN+path+"?SYNTHETIC_QUERY=secret#SYNTHETIC_FRAGMENT")
+    route.request.post_data = "SYNTHETIC_BODY=secret"
+    route.request.frame = page.main_frame
+    guard.route(route)
+    value = guard.failure.blocked_request
+    assert guard.failure.reason == "unexpected_write" and route.aborted and not route.fetched
+    assert value["path"] == expected and value["endpoint"] == "unknown"
+    dumped = json.dumps(value)
+    assert "SYNTHETIC" not in dumped and "secret" not in dumped and "81756" not in dumped
+
+
+def test_non_official_origin_records_no_path():
+    guard, page, _ = reading_guard()
+    route = Route(Reply(), url="https://untrusted.invalid/default/index/GetSquareList")
+    route.request.frame = page.main_frame
+    guard.route(route)
+    assert guard.failure.blocked_request["path"] is None
