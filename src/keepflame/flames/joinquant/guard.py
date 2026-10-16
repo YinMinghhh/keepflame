@@ -2,6 +2,7 @@
 
 from collections import Counter
 import json
+import re
 import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -24,6 +25,27 @@ _ENDPOINTS = {
     "/credits/task/getTaskInfo": "task_status", "/user/index/isLogin": "login_status",
     "/view/user/floor": "credits_document",
 }
+_PATH_SEGMENT = re.compile(r"[A-Za-z][a-z]*(?:[A-Z][a-z]*)*")
+_PATH_MAX_SEGMENTS = 8
+_PATH_MAX_SEGMENT_LENGTH = 40
+
+
+def _sanitized_path(path):
+    """Bare official path shape: camelCase API words kept, digits to :id, anything else :x."""
+    segments = [segment for segment in path.split("/") if segment]
+    shown = []
+    for segment in segments[:_PATH_MAX_SEGMENTS]:
+        if segment.isdigit():
+            shown.append(":id")
+        elif len(segment) <= _PATH_MAX_SEGMENT_LENGTH and _PATH_SEGMENT.fullmatch(segment):
+            shown.append(segment)
+        else:
+            shown.append(":x")
+    if len(segments) > _PATH_MAX_SEGMENTS:
+        shown.append("...")
+    return "/" + "/".join(shown)
+
+
 _PHASES = {"loading", "inspect", "reading", "challenge", "validate", "submit", "confirm", "stopped"}
 _METHODS = {"GET", "POST", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"}
 _RESOURCE_TYPES = {"document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "websocket", "other"}
@@ -105,7 +127,7 @@ class SignInGuard:
             raise FlowError("time_budget")
 
     def _request_diagnostic(self, request):
-        """Only fixed labels and booleans; never retain a URL, header or body."""
+        """Fixed labels, booleans and a sanitized official path; never a URL, query, header or body."""
         parsed = urlsplit(request.url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         endpoint = _ENDPOINTS.get(parsed.path, "unknown")
@@ -127,6 +149,8 @@ class SignInGuard:
             "resource_type": request.resource_type if request.resource_type in _RESOURCE_TYPES else "other",
             "frame": frame,
             "has_query": bool(parsed.query), "has_fragment": bool(parsed.fragment),
+            # Only official-origin paths, reduced to reviewed word shapes; never query/body.
+            "path": _sanitized_path(parsed.path) if origin == JOINQUANT_ORIGIN else None,
         }
 
     def stop(self, reason, status=None, retry_after=None, *, request=None):
