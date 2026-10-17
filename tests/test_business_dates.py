@@ -220,13 +220,14 @@ def test_failure_counter_and_notification_use_admitted_day_even_after_cleanup(tm
             return KeepResult(KeepStatus.FAILED,'offline')
     runner.registry=StaticRegistry(Keeper())
     first=runner.run_flame(flame,notify=False)
-    pending=store.get_notification(flame.id,flame.account_id)
-    assert first.state.last_checked_target.day==pending.business_target.day=='2026-10-08'
-    assert pending.occurred_at==clock.current and first.state.last_checked_at==clock.current
+    # An unpaused first failure retries silently; the attempt is counted on the admitted day.
+    assert store.get_notification(flame.id,flame.account_id) is None
+    assert first.state.last_checked_target.day=='2026-10-08' and first.state.last_checked_at==clock.current
+    assert first.record.result.metadata['retry_attempt']==1
+    assert first.record.result.metadata['business_target']['day']=='2026-10-08'
     second=runner.run_flame(flame,notify=False)
     assert second.state.consecutive_failures==1 and second.state.last_checked_target.day=='2026-10-09'
-    assert store.get_notification(flame.id,flame.account_id).notification_id==pending.notification_id
-    assert store.get_notification(flame.id,flame.account_id).business_target==pending.business_target
+    assert second.record.result.metadata['retry_attempt']==1
 
 
 def test_pending_receipt_notification_round_trips_and_jsonl_exposes_target(tmp_path):

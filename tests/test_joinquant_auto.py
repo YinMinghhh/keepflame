@@ -129,7 +129,8 @@ def test_submission_failure_is_not_retried(reason):
     page = FakePage([unsigned()], submit_error=FlowError(reason))
     result = execute(page)
     assert result.status is KeepStatus.FAILED
-    assert result.next_action_at == local(11, 15)
+    # Non-human stops carry no fixed delay; the core's bounded retry ladder schedules them.
+    assert result.next_action_at is None
     assert page.answers == [90]
 
 
@@ -493,7 +494,7 @@ def test_zero_claim_button_miss_is_due_the_same_day_and_a_submitted_write_stays_
     assert missed.state.status is KeepStatus.FAILED
     assert missed.record.result.metadata["reason"] == "signin_button_changed"
     assert counts["challenge"] == counts["answer"] == counts["claim"] == 0
-    assert due == now.astimezone(timezone.utc) + timedelta(minutes=60)
+    assert due == now.astimezone(timezone.utc) + timedelta(minutes=30)
     assert due.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat() == "2026-10-11"
     assert due - now.astimezone(timezone.utc) < timedelta(hours=6)
     assert storage.pauses == {}
@@ -505,11 +506,12 @@ def test_zero_claim_button_miss_is_due_the_same_day_and_a_submitted_write_stays_
     due = submitted.state.next_action_at
     counts = submitted.record.result.metadata["stage_counts"]
     assert counts["challenge"] == 1 and counts["answer"] == counts["claim"] == 0
-    assert due >= now.astimezone(timezone.utc) + timedelta(hours=6)
+    # The pause, not a fixed browser delay, keeps a submitted write stopped.
+    assert due == now.astimezone(timezone.utc) + timedelta(minutes=30)
     assert storage.pauses == {("joinquant", "synthetic", "joinquant-primary"): "challenge_answer_rejected"}
     assert execution_paused(storage, "joinquant", "synthetic", "joinquant-primary", now=now) is True
     assert "same_day_retry_minutes" not in submitted.record.result.metadata
-    print("observation submitted_challenge long_backoff=true stayed_stopped=true")
+    print("observation submitted_challenge paused=true stayed_stopped=true")
 
 
 def test_profile_allows_chrome_singleton_lock_links(tmp_path):

@@ -54,7 +54,7 @@ KEEPFLAME_SYNTHETIC_BROWSER=1 .venv/bin/python -m pytest tests/test_joinquant_re
 
 当前日状态不能证明其他日期的未决动作完成。已有 pending 的 day 与本轮北京时间业务日不一致时，即使观察到 complete，也保留观察元数据并返回 WAITING_HUMAN / pending_different_day，继续暂停；不读取文章、不挑战、不领取、不确认旧动作。只有同日且存储原子确认成功才收敛该 pending；存储拒绝则以 action_confirmation_rejected 停止。例外：该 pending 关联运行的 stage_counts.claim 恰好是整数 0，且没有归档证书时，下一个 Asia/Shanghai 业务日可以重新预留，原行换成新的 pending，不删除历史。若当天官方状态已经完成，先把该 pending 预留到当天再确认。已提交领取、同一天、缺少该计数或已有归档的 pending 仍停在原日并继续暂停。
 
-签到在离开加载阶段前等待官方页面自己的两次 task-info 读取；这两次读取只在加载阶段放行。随后只在页面上恰好有一个「签到」按钮时点击一次。签到多出来的 task-info 读取只记入 blocked_page_status，不停止这一轮，也不算领取。阅读任务的第三次初始读取仍以 page_status_budget 停止。没有发出挑战、答案或领取、只因按钮未出现而失败的签到，会在同一上海日、六小时内再次到期，不暂停账号。已经发出挑战、答案或领取的失败保持长时间退避，当天和下一天都继续停止，未决写入不会改到新的一天。
+签到在离开加载阶段前等待官方页面自己的两次 task-info 读取；这两次读取只在加载阶段放行。随后只在页面上恰好有一个「签到」按钮时点击一次。签到多出来的 task-info 读取只记入 blocked_page_status，不停止这一轮，也不算领取。阅读任务的第三次初始读取仍以 page_status_budget 停止。没有发出挑战、答案或领取、只因按钮未出现而失败的签到，按核心的有限重试阶梯在同一上海日再次到期（`same_day_retry_minutes` 只是下限），不暂停账号。非人工停止不再自带六小时延迟，只保留平台 `Retry-After` 下限；已经发出挑战、答案或领取的失败靠暂停保持停止，未决写入不会改到新的一天。
 
 聚宽浏览器任务使用可见窗口。browser_headless = true 不会隐藏这个窗口，结果 metadata 的 browser_window 为 visible。官方积分流水出现本轮任务的新行时，结果记录该行时间、项目原文和数量，奖励单位是积分、来源是观察到的值。流水缺失、code 20000 或没有新增时，金额记为未证实，不编造数量，也不构造奖励。
 

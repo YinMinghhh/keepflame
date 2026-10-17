@@ -11,7 +11,12 @@ enabled = false
 
 [flames.schedule]
 timezone = "Asia/Shanghai"
-first_check = "09:00"
+# Each day draws one uniform start in [09:00, 11:00), kept across restarts.
+# A fixed `first_check = "09:00"` (instead of the window keys) still works.
+first_window_start = "09:00"
+first_window_end = "11:00"
+# FAILED runs retry after 30, 60, 120 minutes, then stop for the day with one alert.
+retry_minutes = [30, 60, 120]
 recheck_minutes = 60
 reminder_at = "20:00"
 stop_at = "23:00"
@@ -30,7 +35,12 @@ enabled = false
 
 [flames.schedule]
 timezone = "Asia/Shanghai"
-first_check = "09:10"
+# Drawn independently, but never earlier than 5 minutes after check-in that day.
+first_window_start = "09:00"
+first_window_end = "11:00"
+after_flame = "joinquant-primary"
+min_gap_minutes = 5
+retry_minutes = [30, 60, 120]
 recheck_minutes = 60
 reminder_at = "20:00"
 stop_at = "23:00"

@@ -29,7 +29,7 @@ from keepflame.core.protocols import (
     SecretResolver,
     Storage,
 )
-from keepflame.core.schedule import next_after_result, reminder_due
+from keepflame.core.schedule import RETRIES_EXHAUSTED_KEY, failure_plan, next_after_result, reminder_due
 
 
 class SystemClock:
@@ -122,18 +122,25 @@ class Orchestrator:
         failures = (previous.consecutive_failures if same_target else 0) + 1
         retry_minutes = result.metadata.get("same_day_retry_minutes")
         short_retry = type(retry_minutes) is int and 1 <= retry_minutes < 360
-        result = replace(
-            result,
-            metadata={**result.metadata, "business_target": target.to_dict()},
-            next_action_at=next_after_result(
+        # A Keeper's own next_action_at is only a floor (e.g. Retry-After). For FAILED,
+        # the bounded retry ladder decides; a short-retry hint is just another floor.
+        requested_at = (finished_at + timedelta(minutes=retry_minutes)
+                        if short_retry else result.next_action_at)
+        metadata = {**result.metadata, "business_target": target.to_dict()}
+        if result.status is KeepStatus.FAILED:
+            plan = failure_plan(flame.schedule, finished_at, failures, requested_at=requested_at)
+            next_action = plan.next_at
+            metadata["retry_attempt"] = failures
+            metadata["retry_limit"] = len(flame.schedule.retry_minutes)
+            if plan.exhausted:
+                metadata["retries_exhausted"] = True
+        else:
+            next_action = next_after_result(
                 flame.schedule, finished_at, result.status,
-                requested_at=(finished_at + timedelta(minutes=retry_minutes)
-                              if short_retry else result.next_action_at),
-                consecutive_failures=1 if short_retry else failures,
+                requested_at=requested_at,
                 completed_target=None if result.receipt is None else result.receipt.target,
-                maximum=timedelta(hours=6) if short_retry else None,
-            ),
-        )
+            )
+        result = replace(result, metadata=metadata, next_action_at=next_action)
         event, mark_reminder = self._notification(
             flame,
             previous,
@@ -224,6 +231,9 @@ class Orchestrator:
             return
         if previous is not None and previous.metadata.get("no_success_alert_day") == target.day:
             return
+        # The retries-exhausted alert already covered this business day.
+        if previous is not None and previous.metadata.get(RETRIES_EXHAUSTED_KEY) == target.day:
+            return
         # WAITING_HUMAN already has human_action_required / reminder coverage.
         if previous is not None and previous.status is KeepStatus.WAITING_HUMAN:
             return
@@ -291,7 +301,9 @@ class Orchestrator:
             last_reminder = None
         else:
             last_success = None if previous is None else previous.last_success_at
-            failures = 0
+            # WAITING_HUMAN neither spends nor refunds the day's FAILED retry budget.
+            failures = (previous.consecutive_failures
+                        if previous is not None and previous.last_checked_target == target else 0)
             same_action = (
                 previous is not None
                 and previous.status is KeepStatus.WAITING_HUMAN
@@ -310,6 +322,11 @@ class Orchestrator:
             stamped = previous.metadata.get("no_success_alert_day")
             if isinstance(stamped, str) and stamped == target.day:
                 metadata.setdefault("no_success_alert_day", stamped)
+            exhausted = previous.metadata.get(RETRIES_EXHAUSTED_KEY)
+            if isinstance(exhausted, str) and exhausted == target.day:
+                metadata.setdefault(RETRIES_EXHAUSTED_KEY, exhausted)
+        if result.status is KeepStatus.FAILED and metadata.get("retries_exhausted") is True:
+            metadata[RETRIES_EXHAUSTED_KEY] = target.day
         return FlameState(
             flame_id=flame.id,
             account_id=flame.account_id,
@@ -355,6 +372,13 @@ class Orchestrator:
         if result.status is KeepStatus.FAILED:
             if result.metadata.get("reason") == "business_day_no_success":
                 return "business_day_no_success", False
+            if result.metadata.get("automation_paused") is not True:
+                # Unpaused failures retry silently; one alert once the day's retries run out.
+                if result.metadata.get("retries_exhausted") is not True:
+                    return None, False
+                if previous is not None and previous.metadata.get(RETRIES_EXHAUSTED_KEY) == target.day:
+                    return None, False
+                return "retries_exhausted", False
             if (
                 previous is None
                 or previous.status is not KeepStatus.FAILED

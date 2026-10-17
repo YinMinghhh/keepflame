@@ -53,13 +53,33 @@ class SlackConfig:
     timeout_seconds: float
 
 
+DEFAULT_FIRST_WINDOW = (time(9, 0), time(11, 0))
+DEFAULT_RETRY_MINUTES = (30, 60, 120)
+MAX_RETRIES = 10
+MAX_RETRY_MINUTES = 720
+MAX_GAP_MINUTES = 720
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduleConfig:
+    """Daily window for one Flame.
+
+    ``first_check`` is the earliest daily start. With ``first_window_end`` set, each
+    business day draws one uniform first-run time in ``[first_check, first_window_end)``;
+    without it, ``first_check`` is a fixed daily start (the historic behavior).
+    FAILED runs retry after ``retry_minutes`` in order, then stop for that day.
+    ``after_flame`` keeps this Flame at least ``min_gap_minutes`` after that Flame.
+    """
+
     timezone: str
     first_check: time
     recheck_minutes: int
     reminder_at: time
     stop_at: time
+    first_window_end: time | None = None
+    retry_minutes: tuple[int, ...] = DEFAULT_RETRY_MINUTES
+    after_flame: str | None = None
+    min_gap_minutes: int = 5
 
     def __post_init__(self) -> None:
         try:
@@ -70,6 +90,23 @@ class ScheduleConfig:
             raise ConfigError("recheck_minutes must be positive")
         if not self.first_check < self.reminder_at < self.stop_at:
             raise ConfigError("schedule times must satisfy first_check < reminder_at < stop_at")
+        if self.first_window_end is not None and not self.first_check < self.first_window_end < self.stop_at:
+            raise ConfigError("first window must satisfy first_window_start < first_window_end < stop_at")
+        retries = self.retry_minutes
+        if (not isinstance(retries, tuple) or not 1 <= len(retries) <= MAX_RETRIES
+                or any(isinstance(item, bool) or not isinstance(item, int)
+                       or not 1 <= item <= MAX_RETRY_MINUTES for item in retries)):
+            raise ConfigError(
+                f"retry_minutes must list 1 to {MAX_RETRIES} integers from 1 to {MAX_RETRY_MINUTES}")
+        gap = self.min_gap_minutes
+        if isinstance(gap, bool) or not isinstance(gap, int) or not 0 <= gap <= MAX_GAP_MINUTES:
+            raise ConfigError(f"min_gap_minutes must be an integer from 0 to {MAX_GAP_MINUTES}")
+        if self.after_flame is not None and (not isinstance(self.after_flame, str) or not self.after_flame.strip()):
+            raise ConfigError("after_flame must be a non-empty flame id")
+
+    @property
+    def randomized(self) -> bool:
+        return self.first_window_end is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +284,75 @@ def _parse_slack(raw: dict[str, Any]) -> SlackConfig | None:
     return SlackConfig(enabled=enabled, webhook_file=file_path, timeout_seconds=float(timeout))
 
 
+_SCHEDULE_KEYS = {
+    "timezone", "first_check", "first_window_start", "first_window_end", "recheck_minutes",
+    "reminder_at", "stop_at", "retry_minutes", "after_flame", "min_gap_minutes",
+}
+
+
+def _parse_schedule(schedule_raw: dict[str, Any], name: str) -> ScheduleConfig:
+    _reject_unknown(schedule_raw, _SCHEDULE_KEYS, name)
+    recheck = schedule_raw.get("recheck_minutes")
+    if not isinstance(recheck, int) or isinstance(recheck, bool):
+        raise ConfigError(f"{name}.recheck_minutes must be an integer")
+    window_keys = {"first_window_start", "first_window_end"} & set(schedule_raw)
+    if "first_check" in schedule_raw:
+        if window_keys:
+            raise ConfigError(f"{name}: use either first_check or first_window_start/first_window_end")
+        first = _parse_time(schedule_raw.get("first_check"), f"{name}.first_check")
+        window_end = None
+    elif window_keys:
+        if len(window_keys) != 2:
+            raise ConfigError(f"{name}: first_window_start and first_window_end must be set together")
+        first = _parse_time(schedule_raw.get("first_window_start"), f"{name}.first_window_start")
+        window_end = _parse_time(schedule_raw.get("first_window_end"), f"{name}.first_window_end")
+        if not first < window_end:
+            raise ConfigError(f"{name}.first_window_start must be before first_window_end")
+    else:
+        first, window_end = DEFAULT_FIRST_WINDOW
+    retries_raw = schedule_raw.get("retry_minutes", list(DEFAULT_RETRY_MINUTES))
+    if not isinstance(retries_raw, list):
+        raise ConfigError(f"{name}.retry_minutes must be a list of integers")
+    after = schedule_raw.get("after_flame")
+    if after is not None:
+        after = _required_text(schedule_raw, "after_flame", name)
+    if "min_gap_minutes" in schedule_raw and after is None:
+        raise ConfigError(f"{name}.min_gap_minutes requires after_flame")
+    gap = schedule_raw.get("min_gap_minutes", 5)
+    try:
+        return ScheduleConfig(
+            timezone=_required_text(schedule_raw, "timezone", name),
+            first_check=first,
+            recheck_minutes=recheck,
+            reminder_at=_parse_time(schedule_raw.get("reminder_at"), f"{name}.reminder_at"),
+            stop_at=_parse_time(schedule_raw.get("stop_at"), f"{name}.stop_at"),
+            first_window_end=window_end,
+            retry_minutes=tuple(retries_raw),
+            after_flame=after,
+            min_gap_minutes=gap,
+        )
+    except ConfigError as exc:
+        raise ConfigError(f"{name}: {exc}") from exc
+
+
+def _validate_ordering(flames: list[FlameConfig]) -> None:
+    """after_flame names another Flame in the same timezone; one level only, no cycles."""
+    by_id = {flame.id: flame for flame in flames}
+    for flame in flames:
+        anchor_id = flame.schedule.after_flame
+        if anchor_id is None:
+            continue
+        anchor = by_id.get(anchor_id)
+        if anchor is None:
+            raise ConfigError(f"{flame.id}: after_flame names unknown flame {anchor_id}")
+        if anchor.id == flame.id:
+            raise ConfigError(f"{flame.id}: after_flame cannot name itself")
+        if anchor.schedule.after_flame is not None:
+            raise ConfigError(f"{flame.id}: after_flame target {anchor_id} cannot itself use after_flame")
+        if anchor.schedule.timezone != flame.schedule.timezone:
+            raise ConfigError(f"{flame.id}: after_flame target must share the same timezone")
+
+
 def default_config_path() -> Path:
     return Path(os.environ.get("KEEPFLAME_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
 
@@ -298,25 +404,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ConfigError(f"{name}.enabled must be true or false")
 
         schedule_raw = _expect_table(table.get("schedule"), f"{name}.schedule")
-        _reject_unknown(
-            schedule_raw,
-            {"timezone", "first_check", "recheck_minutes", "reminder_at", "stop_at"},
-            f"{name}.schedule",
-        )
-        recheck = schedule_raw.get("recheck_minutes")
-        if not isinstance(recheck, int) or isinstance(recheck, bool):
-            raise ConfigError(f"{name}.schedule.recheck_minutes must be an integer")
-        schedule = ScheduleConfig(
-            timezone=_required_text(schedule_raw, "timezone", f"{name}.schedule"),
-            first_check=_parse_time(
-                schedule_raw.get("first_check"), f"{name}.schedule.first_check"
-            ),
-            recheck_minutes=recheck,
-            reminder_at=_parse_time(
-                schedule_raw.get("reminder_at"), f"{name}.schedule.reminder_at"
-            ),
-            stop_at=_parse_time(schedule_raw.get("stop_at"), f"{name}.schedule.stop_at"),
-        )
+        schedule = _parse_schedule(schedule_raw, f"{name}.schedule")
 
         settings_raw = _expect_table(table.get("settings", {}), f"{name}.settings")
         settings = {
@@ -341,6 +429,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             )
         )
 
+    _validate_ordering(flames)
     return AppConfig(
         storage=StorageConfig(path=storage_path),
         flames=tuple(flames),
