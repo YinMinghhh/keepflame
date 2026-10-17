@@ -10,6 +10,10 @@ enabled = false
 [flames.schedule]
 timezone = "Asia/Shanghai"
 first_check = "09:00"
+# Or a random daily start instead of first_check:
+# first_window_start = "09:00"
+# first_window_end = "11:00"
+# retry_minutes = [30, 60, 120]
 recheck_minutes = 60
 reminder_at = "20:00"
 stop_at = "23:00"

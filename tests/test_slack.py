@@ -215,8 +215,9 @@ def test_enabled_slack_sends_one_short_redacted_message_per_event(tmp_path: Path
         assert HOOK.encode() not in case.storage.path.read_bytes()
         assert case.storage.get_notification("joinquant-primary", "primary") is None
 
+    # Unpaused FAILED runs retry silently within the bounded ladder; no flame_failed here.
     assert [event for event, _text in seen] == [
-        "human_action_required", "human_action_reminder", "credit_recorded", "flame_failed", "flame_recovered",
+        "human_action_required", "human_action_reminder", "credit_recorded", "flame_recovered",
     ]
     required = seen[0][1]
     assert "REFRESH_SESSION" in required and "需要登录" in required and "在官方页面完成这一步" in required
@@ -226,7 +227,9 @@ def test_enabled_slack_sends_one_short_redacted_message_per_event(tmp_path: Path
 
 
 def test_message_escapes_slack_control_characters_and_is_bounded(tmp_path: Path) -> None:
-    noisy = KeepResult(KeepStatus.FAILED, "<!channel> & <https://x.invalid|click>\n" + "x" * 2000)
+    # A paused failure alerts immediately, so the rendered text can be inspected.
+    noisy = KeepResult(KeepStatus.FAILED, "<!channel> & <https://x.invalid|click>\n" + "x" * 2000,
+                       metadata={"automation_paused": True})
     case = _service(tmp_path, "escape", [noisy])
     _tick(case, local(11, 9))
     text = case.slack.texts[0]

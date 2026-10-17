@@ -207,6 +207,13 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
                         PRIMARY KEY (flame_id, account_id)
                     )"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS daily_first_runs (
+                        flame_id TEXT NOT NULL, account_id TEXT NOT NULL, day TEXT NOT NULL,
+                        window TEXT NOT NULL, first_run_at TEXT NOT NULL,
+                        PRIMARY KEY (flame_id, account_id, day)
+                    )"""
+                )
                 self._initialize_control(connection)
                 self._initialize_archive(connection)
                 self._initialize_dispatch(connection)
@@ -391,6 +398,35 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
             raise StorageError("SQLite schema is not ready")
 
 
+
+    def daily_first_run(self, flame_id: str, account_id: str, day: str, window: str, draw) -> datetime:
+        """Return the persisted first-run draw for a day, drawing once per day and window."""
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT window, first_run_at FROM daily_first_runs WHERE flame_id = ? AND account_id = ? AND day = ?",
+                    (flame_id, account_id, day),
+                ).fetchone()
+                if row is not None and row["window"] == window:
+                    value = _datetime(row["first_run_at"])
+                    if value is not None:
+                        return value
+                value = draw()
+                connection.execute(
+                    """INSERT INTO daily_first_runs VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(flame_id, account_id, day)
+                       DO UPDATE SET window = excluded.window, first_run_at = excluded.first_run_at""",
+                    (flame_id, account_id, day, window, _timestamp(value)),
+                )
+                # Keep only a short horizon of draws.
+                connection.execute(
+                    "DELETE FROM daily_first_runs WHERE flame_id = ? AND account_id = ? AND day < date(?, '-14 day')",
+                    (flame_id, account_id, day),
+                )
+                return value
+        except (sqlite3.Error, ValueError) as exc:
+            raise StorageError("failed to read or store daily first-run draw") from exc
 
     def get_notification(self, flame_id: str, account_id: str) -> PendingNotification | None:
         try:

@@ -12,7 +12,7 @@ from keepflame.core.models import KeepResult, KeepStatus, RunOutcome
 from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.protocols import Clock, Storage, StorageError
 from keepflame.core.eligibility import execution_paused
-from keepflame.core.schedule import due_at
+from keepflame.core.planner import DailyPlanner
 
 
 class SchedulerService:
@@ -26,6 +26,7 @@ class SchedulerService:
         stop_event: threading.Event | None = None,
         before_tick=None,
         blocked=None,
+        planner: DailyPlanner | None = None,
     ) -> None:
         self.config = config
         self.storage = storage
@@ -34,6 +35,7 @@ class SchedulerService:
         self.stop_event = stop_event or threading.Event()
         self.before_tick = before_tick or (lambda: None)
         self.blocked = blocked or (lambda flame: False)
+        self.planner = planner or DailyPlanner(storage)
         # One storage_corrupt alert per Flame/account/UTC-day within this process.
         self._storage_fault_days: set[tuple[str, str, str]] = set()
 
@@ -55,7 +57,7 @@ class SchedulerService:
                         self.storage, flame.keeper, flame.account_id, flame.id, now=current):
                     continue
                 state = self.storage.get_state(flame.id, flame.account_id)
-                if due_at(flame.schedule, state, current) <= current:
+                if self.planner.due(self.config, flame, state, current) <= current:
                     outcomes.append(self.orchestrator.run_flame(flame, now=current))
             except StorageError as exc:
                 self._report_storage_corrupt(exc, flame=flame, now=current)
@@ -74,7 +76,7 @@ class SchedulerService:
                         self.storage, flame.keeper, flame.account_id, flame.id, now=current):
                     continue
                 state = self.storage.get_state(flame.id, flame.account_id)
-                candidate = due_at(flame.schedule, state, current)
+                candidate = self.planner.due(self.config, flame, state, current)
                 if next_due is None or candidate < next_due:
                     next_due = candidate
             except StorageError as exc:

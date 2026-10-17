@@ -359,12 +359,26 @@ def render_plan(server_home: Path, commit: str) -> tuple[dict[str, object], dict
         "# Recreate the venv and enroll/login locally on the server after authorization.",
         "[storage]", f"path = {quote(paths['database'])}", "",
     ]
-    for flame_id, task_name, first_check in (("joinquant-primary", "checkin", "09:00"),
-                                             ("joinquant-reading-primary", "reading", "09:10")):
+    for flame_id, task_name in (("joinquant-primary", "checkin"), ("joinquant-reading-primary", "reading")):
+        if task_name == "checkin":
+            timing = [
+                "# Each day draws one uniform start in [09:00, 11:00), kept across restarts.",
+                '# A fixed `first_check = "09:00"` (instead of the window keys) still works.',
+                'first_window_start = "09:00"', 'first_window_end = "11:00"',
+                "# FAILED runs retry after 30, 60, 120 minutes, then stop for the day with one alert.",
+                "retry_minutes = [30, 60, 120]",
+            ]
+        else:
+            timing = [
+                "# Drawn independently, but never earlier than 5 minutes after check-in that day.",
+                'first_window_start = "09:00"', 'first_window_end = "11:00"',
+                'after_flame = "joinquant-primary"', "min_gap_minutes = 5",
+                "retry_minutes = [30, 60, 120]",
+            ]
         config.extend([
             "[[flames]]", f'id = "{flame_id}"', 'keeper = "joinquant"', 'account_id = "primary"',
             "enabled = false", "", "[flames.schedule]", 'timezone = "Asia/Shanghai"',
-            f'first_check = "{first_check}"', "recheck_minutes = 60", 'reminder_at = "20:00"',
+            *timing, "recheck_minutes = 60", 'reminder_at = "20:00"',
             'stop_at = "23:00"', "", "[flames.settings]", 'mode = "browser"',
             f'task = "{task_name}"', f"browser_profile_dir = {quote(paths['profile'])}",
             "browser_headless = false",

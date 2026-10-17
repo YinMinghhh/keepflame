@@ -20,7 +20,6 @@ from keepflame.core.orchestrator import Orchestrator, SystemClock
 from keepflame.core.plugins import EntryPointKeeperRegistry
 from keepflame.core.protocols import Notifier
 from keepflame.core.service import SchedulerService
-from keepflame.core.schedule import due_at
 from keepflame.core.protocols import AutomationPaused
 from keepflame.notifier import JsonlNotifier
 from keepflame.notifier.lifecycle import ConfigView, LifecycleNotifier
@@ -142,7 +141,7 @@ class Runtime:
             reason = 'flame_disabled_or_changed'
         elif self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
             reason = 'automation_paused'
-        elif due_at(flame.schedule, self.storage.get_state(flame.id, flame.account_id), now) > now:
+        elif self.service.planner.due(self.config, flame, self.storage.get_state(flame.id, flame.account_id), now) > now:
             reason = 'not_due'
         outcome = None
         if reason is None:

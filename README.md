@@ -76,7 +76,9 @@ daemon 正常退出取消未开始请求；已开始而未确认完成的请求�
 
 ## 调度、暂停与不确定结果
 
-示例为 `Asia/Shanghai`，每日窗口 `[09:00, 23:00)`；签到与阅读时间错开。同日成功后不再自动查询，停机错过的检查只补查一次，不批量补领历史任务。一般传输失败按 1、2、4、最多 6 小时退避并尊重更晚的 `Retry-After`。
+示例为 `Asia/Shanghai`，每日窗口到 `23:00` 截止。每个 Flame 每天在 `first_window_start`–`first_window_end`（默认 09:00–11:00）内均匀随机抽一个首次运行时间，抽签结果存进状态库，同一天重启不重抽，次日重抽；只写 `first_check` 时仍是固定时间。阅读可用 `after_flame = "joinquant-primary"` 与 `min_gap_minutes = 5` 保证当天不早于签到抽签时间、也不早于签到实际运行后 5 分钟。同日成功后不再自动查询，停机错过的检查只补查一次，不批量补领历史任务。
+
+FAILED（未暂停）按 `retry_minutes`（默认 30、60、120 分钟）有限重试，重试期间不发通知；超出 `stop_at` 或次数用完后，当天不再自动运行，并按 Flame 每天发一次 `retries_exhausted`（Slack/邮箱按已启用渠道投递），同日的 `business_day_no_success` 不再重复。平台 `Retry-After` 仍是下限。暂停类失败照旧立即发 `flame_failed`；WAITING_HUMAN 不消耗也不重置重试次数。配置校验：窗口须 start < end < stop_at，`retry_minutes` 为 1–10 个 1–720 的整数，`after_flame` 须指向同时区、自身不再依赖他人的 Flame。
 
 登录失效会持久暂停该 Keeper 的整个账号；挑战、协议变化和不确定领取暂停对应任务，后台不反复尝试。人工处理后 `resume --flame ID --execute` 只解除该任务暂停；浏览器账号登录暂停使用上面的登录确认流程。查询模式在人工更新原凭据文件后，可用 `resume --flame ID --account --execute` 明确恢复该 Keeper 的账号检查，后续仍需验证认证；此命令同样不清未决动作。
 

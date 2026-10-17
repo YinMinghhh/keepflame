@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from keepflame.core.config import ScheduleConfig
@@ -35,6 +37,63 @@ def _in_window(schedule: ScheduleConfig, candidate: datetime) -> datetime:
     return candidate
 
 
+RETRIES_EXHAUSTED_KEY = "retries_exhausted_day"
+
+
+@dataclass(frozen=True, slots=True)
+class FailurePlan:
+    """When a FAILED run may try again; ``exhausted`` means not again this business day."""
+
+    next_at: datetime
+    exhausted: bool
+
+
+def window_bounds(schedule: ScheduleConfig, day: date) -> tuple[datetime, datetime]:
+    """UTC bounds of the first-run window; a fixed first_check yields a zero-width window."""
+    zone = ZoneInfo(schedule.timezone)
+    start = _at(day, schedule.first_check, zone)
+    end = _at(day, schedule.first_window_end, zone) if schedule.first_window_end is not None else start
+    return start, max(start, end)
+
+
+def draw_first_run(schedule: ScheduleConfig, day: date, randrange: Callable[[int], int]) -> datetime:
+    """One uniform second in [window start, window end); fixed schedules return first_check."""
+    start, end = window_bounds(schedule, day)
+    span = int((end - start).total_seconds())
+    if span <= 0:
+        return start
+    offset = randrange(span)
+    if type(offset) is not int or not 0 <= offset < span:
+        raise ValueError("random draw outside the first-run window")
+    return start + timedelta(seconds=offset)
+
+
+def failure_plan(
+    schedule: ScheduleConfig,
+    now: datetime,
+    failures: int,
+    *,
+    requested_at: datetime | None = None,
+) -> FailurePlan:
+    """Bounded same-day retries: retry_minutes[n-1] after the n-th failure, then stop."""
+    now = _as_utc(now)
+    zone = ZoneInfo(schedule.timezone)
+    day = now.astimezone(zone).date()
+    tomorrow = max(_at(day + timedelta(days=1), schedule.first_check, zone), now)
+    floor = None if requested_at is None else _as_utc(requested_at)
+    # Platform cooldowns are lower bounds, never permission for an earlier retry,
+    # and they survive into later days when today's retries are used up.
+    stopped = _in_window(schedule, tomorrow if floor is None else max(tomorrow, floor))
+    if not 1 <= failures <= len(schedule.retry_minutes):
+        return FailurePlan(stopped, True)
+    candidate = now + timedelta(minutes=schedule.retry_minutes[failures - 1])
+    if floor is not None:
+        candidate = max(candidate, floor)
+    if candidate >= _at(day, schedule.stop_at, zone) or candidate.astimezone(zone).date() != day:
+        return FailurePlan(stopped, True)
+    return FailurePlan(_in_window(schedule, candidate), False)
+
+
 def next_after_result(
     schedule: ScheduleConfig,
     now: datetime,
@@ -54,12 +113,10 @@ def next_after_result(
                 raise ValueError("completion timezone differs from schedule")
             day = date.fromisoformat(completed_target.day)
         candidate = max(now, _at(day + timedelta(days=1), schedule.first_check, zone))
+    elif status is KeepStatus.FAILED:
+        return failure_plan(schedule, now, max(consecutive_failures, 1), requested_at=requested_at).next_at
     else:
-        minutes = schedule.recheck_minutes
-        if status is KeepStatus.FAILED:
-            factor = 2 ** min(max(consecutive_failures - 1, 0), 10)
-            minutes = min(minutes * factor, max(minutes, 360))
-        candidate = now + timedelta(minutes=minutes)
+        candidate = now + timedelta(minutes=schedule.recheck_minutes)
     # Platform cooldowns are lower bounds, never permission for an earlier retry.
     if requested_at is not None:
         candidate = max(candidate, _as_utc(requested_at))
@@ -72,7 +129,10 @@ def due_at(
     schedule: ScheduleConfig,
     state: FlameState | None,
     now: datetime,
+    *,
+    day_floor: Callable[[date], datetime | None] | None = None,
 ) -> datetime:
+    """Earliest admissible run. ``day_floor(day)`` adds that day's drawn/staggered start."""
     now = _as_utc(now)
     candidate = now
     zone = ZoneInfo(schedule.timezone)
@@ -92,8 +152,19 @@ def due_at(
             and state.last_success_at.astimezone(zone).date() == today
         ):
             candidate = max(candidate, _at(today + timedelta(days=1), schedule.first_check, zone))
+        exhausted = state.metadata.get(RETRIES_EXHAUSTED_KEY)
+        if isinstance(exhausted, str) and exhausted == today.isoformat():
+            candidate = max(candidate, _at(today + timedelta(days=1), schedule.first_check, zone))
     # Preserve future days as well as today's schedule, including after restart.
-    return _in_window(schedule, candidate)
+    candidate = _in_window(schedule, candidate)
+    if day_floor is None:
+        return candidate
+    for _ in range(4):
+        floor = day_floor(candidate.astimezone(zone).date())
+        if floor is None or candidate >= _as_utc(floor):
+            return candidate
+        candidate = _in_window(schedule, _as_utc(floor))
+    return candidate
 
 
 def reminder_due(schedule: ScheduleConfig, state: FlameState | None, now: datetime) -> bool:

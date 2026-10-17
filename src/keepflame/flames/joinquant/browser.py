@@ -68,6 +68,12 @@ SCROLL_STEP_PIXELS = 400
 SCROLL_STEPS = 30
 
 
+
+def _latest(*values):
+    """Latest of the present floors; None when no side asked for a delay."""
+    present = [value for value in values if value is not None]
+    return max(present) if present else None
+
 class JoinQuantPage:
     def __init__(self, page, *, deadline: float, origin: str = JOINQUANT_ORIGIN, request_fetch=None, task=None, date_fence=None):
         self.page = page
@@ -340,14 +346,16 @@ class JoinQuantBrowserKeeper:
     def _stop(context, reason, *, human=False, status=None, retry_after=None, paused=False):
         clock = getattr(context, "clock", None)
         observed_at = clock.now() if clock is not None else context.now
-        next_action = observed_at + timedelta(hours=24 if human else 6)
+        # Human stops wait a day. Other stops carry only a platform floor (Retry-After);
+        # the core's bounded retry ladder schedules them.
+        next_action = observed_at + timedelta(hours=24) if human else None
         if isinstance(retry_after, str) and len(retry_after) <= 128:
             remote_limit = JoinQuantKeeper._retry_after(HttpResponse(
                 status=429 if status in (401, 403) else status, url=JOINQUANT_ORIGIN,
                 headers={"retry-after": retry_after}, body=b"",
             ), observed_at)
             if remote_limit is not None:
-                next_action = max(next_action, remote_limit)
+                next_action = remote_limit if next_action is None else max(next_action, remote_limit)
         metadata = {"execution_mode": "browser", "reason": reason, "remote_status": status}
         if human or paused or status == 429:
             metadata["automation_paused"] = True
@@ -380,7 +388,7 @@ class JoinQuantBrowserKeeper:
         stopped = self._stop(context, "session_refresh_required" if auth else "status_unavailable",
                              human=auth, paused=protocol, status=status)
         return replace(stopped, metadata={**result.metadata, **stopped.metadata},
-                       next_action_at=max(stopped.next_action_at, result.next_action_at or context.now))
+                       next_action_at=_latest(stopped.next_action_at, result.next_action_at))
 
     def _unconfirmed(self, context, observation=None, *, cause=None):
         stopped = self._stop(context, "claim_unconfirmed", human=True,
@@ -389,7 +397,7 @@ class JoinQuantBrowserKeeper:
         if cause:
             metadata["unconfirmed_reason"] = cause
         return replace(stopped, metadata=metadata,
-                       next_action_at=max(stopped.next_action_at, observation.next_action_at or context.now)
+                       next_action_at=_latest(stopped.next_action_at, observation.next_action_at)
                        if observation else stopped.next_action_at)
 
     def _discover(self, context, task, seen):

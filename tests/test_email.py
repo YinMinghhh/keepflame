@@ -212,10 +212,11 @@ def test_enabled_mail_sends_each_lifecycle_event_once_and_keeps_jsonl(tmp_path: 
         assert case.storage.get_notification("joinquant-primary", "primary") is None
 
     events = [event for event, _body_text, _case in paired]
+    # Unpaused FAILED runs retry silently within the bounded ladder; no flame_failed here.
     assert events == [
-        "human_action_required", "human_action_reminder", "credit_recorded", "flame_failed", "flame_recovered",
+        "human_action_required", "human_action_reminder", "credit_recorded", "flame_recovered",
     ]
-    required, reminder, credit_body, _failed, _recovered_body = (item[1] for item in paired)
+    required, reminder, credit_body, _recovered_body = (item[1] for item in paired)
     for body in (required, reminder):
         assert "REFRESH_SESSION" in body
         assert "需要登录" in body
