@@ -33,13 +33,17 @@ def setup(tmp_path, results, *, notifier=None, current=None, storage=None):
     return runner, service, storage, keeper, clock, notifier
 
 
-@pytest.mark.parametrize("result", [wait_result(), KeepResult(KeepStatus.FAILED, "offline")])
-def test_late_window_does_not_spin_and_restart_preserves_next_day(tmp_path, result):
-    runner, service, storage, keeper, clock, _ = setup(tmp_path, [result], current=local(11, 22))
+# A FAILED run at 22:45 has no retry slot before stop_at (23:00), so it stops for the day.
+@pytest.mark.parametrize("result, start", [
+    (wait_result(), local(11, 22)),
+    (KeepResult(KeepStatus.FAILED, "offline"), local(11, 22) + timedelta(minutes=45)),
+])
+def test_late_window_does_not_spin_and_restart_preserves_next_day(tmp_path, result, start):
+    runner, service, storage, keeper, clock, _ = setup(tmp_path, [result], current=start)
     outcomes, next_due = service.run_due()
     assert len(outcomes) == 1
     assert next_due == local(12, 9)
-    for instant in [local(11, 22) + timedelta(milliseconds=250), local(11, 23), local(12, 8)]:
+    for instant in [start + timedelta(milliseconds=250), local(11, 23), local(12, 8)]:
         clock.current = instant
         assert service.run_due() == ([], local(12, 9))
     assert storage.count_runs() == 1
@@ -75,7 +79,8 @@ def test_failure_backoff_is_bounded_and_success_resets_it(tmp_path):
         next_after_result(schedule, local(11, 9), KeepStatus.FAILED, consecutive_failures=n)
         - local(11, 9) for n in (1, 2, 3, 4, 1000000)
     ]
-    assert delays == [timedelta(hours=h) for h in (1, 2, 4, 6, 6)]
+    # Bounded retries: 30, 60, 120 minutes, then nothing until the next day's first check.
+    assert delays == [timedelta(minutes=m) for m in (30, 60, 120)] + [timedelta(hours=24)] * 2
     runner, _, storage, _, _, _ = setup(tmp_path, [
         KeepResult(KeepStatus.FAILED, "offline"), KeepResult(KeepStatus.SUCCESS, "done"),
         KeepResult(KeepStatus.FAILED, "offline"),
@@ -87,7 +92,7 @@ def test_failure_backoff_is_bounded_and_success_resets_it(tmp_path):
     runner.clock.current = local(12, 9)
     result = runner.run_flame(flame(), now=local(12, 9))
     assert result.state.consecutive_failures == 1
-    assert result.state.next_action_at == local(12, 10)
+    assert result.state.next_action_at == local(12, 9) + timedelta(minutes=30)
 
 
 def test_platform_cooldown_is_preserved_and_clamped_to_window(tmp_path):
@@ -99,7 +104,7 @@ def test_platform_cooldown_is_preserved_and_clamped_to_window(tmp_path):
     clock.current = local(12, 10)
     assert service.run_due() == ([], local(13, 9))
     assert next_after_result(flame().schedule, local(11, 9), KeepStatus.FAILED,
-                             requested_at=local(10, 9)) == local(11, 10)
+                             requested_at=local(10, 9)) == local(11, 9) + timedelta(minutes=30)
 
 
 def test_restart_catches_up_once_after_downtime(tmp_path):
@@ -234,10 +239,13 @@ def test_schema_v1_is_migrated_without_losing_history(tmp_path):
 
 def test_pending_failure_alert_is_retained_across_days(tmp_path):
     failure = KeepResult(KeepStatus.FAILED, "offline")
-    runner, _, storage, _, _, _ = setup(tmp_path, [failure, failure])
-    runner.clock.current = local(11, 9)
-    runner.run_flame(flame(), now=local(11, 9), notify=False)
+    runner, _, storage, _, _, _ = setup(tmp_path, [failure] * 5)
+    # Retries are silent; the alert is queued once the day's retries run out.
+    for minutes in (0, 30, 90, 210):
+        runner.clock.current = local(11, 9) + timedelta(minutes=minutes)
+        runner.run_flame(flame(), now=runner.clock.current, notify=False)
     first = storage.get_notification(flame().id, flame().account_id)
+    assert first.event == "retries_exhausted"
     runner.clock.current = local(12, 9)
     runner.run_flame(flame(), now=local(12, 9), notify=False)
     assert storage.get_notification(flame().id, flame().account_id).notification_id == first.notification_id
