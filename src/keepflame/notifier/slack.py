@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -46,6 +47,9 @@ def render_lifecycle_message(
             f"Summary: {_field(action.summary)}",
             f"Instructions: {_field(action.instructions)}",
         ])
+        link = _plain_action_url(action.url)
+        if link is not None:
+            lines.append(f"Action-URL: {link}")
     if event == "credit_recorded":
         credit = _credit_fields(result)
         if credit is not None:
@@ -157,6 +161,28 @@ def _field(value: object) -> str:
     if len(text) > _FIELD_LIMIT:
         text = text[: _FIELD_LIMIT - 1] + "…"
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_URL_HOST = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}")
+_URL_PATH = re.compile(r"(?:/[A-Za-z0-9._~-]{1,48}){0,4}/?")
+
+
+def _plain_action_url(url: str | None) -> str | None:
+    """A clickable link only for a bare https origin+path; anything with a query,
+    fragment, credentials or port could carry a token, so it stays out of Slack."""
+    if not url or len(url) > 200:
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    if (parts.scheme != "https" or port is not None or parts.username is not None or parts.password is not None
+            or parts.query or parts.fragment or "?" in url or "#" in url or not _URL_HOST.fullmatch(host)
+            or parts.netloc != host or not _URL_PATH.fullmatch(parts.path)):
+        return None
+    return f"https://{host}{parts.path}"
 
 
 def _next_action(value: datetime | None) -> str:

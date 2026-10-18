@@ -25,3 +25,5 @@
 `test_daemon_dispatch_browser.py` 另有两个 opt-in Chrome 场景：合成正式登录后，CLI 签到/阅读任务沿原上下文及未改动的聚宽门禁运行；阅读中的未知 POST 被拒绝并保留 pending。另一个主动关闭自己的合成 context，验证后续任务停止且不自动重建。只用空临时 profile、合成 HttpOnly Cookie、内存传输；不包含真实认证、跨日有效期、跨进程会话恢复或领取成功验收。应通过受限验证脚本禁用 DNS 并设置关闭的回环代理；不得为了用例通过放宽生产路由。
 
 `test_daemon_owner_liveness.py` 覆盖独立复核的P2：合成daemon子进程os._exit后，普通run-once子进程持通用锁，第三个CLI客户端必须拒绝入队。`daemon_owner_process.py` 只允许新建测试目录内写入，拒绝浏览器、网络、真实账户文件，并为握手设置超时。另检查专属锁的世代绑定、非法owner拒绝、0600/空文件、崩溃残留不代表活性，以及浏览器关闭前两把锁均保留。正常交接、UUID幂等和重启不重放继续由既有定点测试覆盖。
+
+`test_ikuuu.py` 离线覆盖 ikuuu 插件：用真实公开导航页夹具锁定混淆脚本静态解码，假 HTTP 覆盖域名发现（导航镜像不误判、最终主机校验、探测预算）、Cookie 导入解析与 600 原子写入、签到成功/已签到/会话过期/域名变化/错误分类、同日不重复联网、Slack Action-URL 及 CLI 不回显 Cookie 值。全部 Cookie 为自造值，不联网、不签到。

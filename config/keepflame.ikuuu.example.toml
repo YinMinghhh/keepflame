@@ -1,0 +1,40 @@
+# Safe example only. Holds no cookie, no webhook address and no account data.
+# Copy to a *.local.toml (or outside the repo) before a real run.
+[storage]
+path = "../var/keepflame-ikuuu.sqlite3"
+
+[[flames]]
+id = "ikuuu-primary"
+keeper = "ikuuu"
+account_id = "primary"
+enabled = false
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+# Random daily start in [08:30, 10:30); FAILED results retry after 30/60/120 min.
+first_window_start = "08:30"
+first_window_end = "10:30"
+retry_minutes = [30, 60, 120]
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+# Absolute path OUTSIDE any git checkout. Written by
+#   pbpaste | keepflame ikuuu import-cookie --flame ikuuu-primary --base https://ikuuu.pw
+# with mode 600. Never put the cookie itself in this TOML file.
+cookie_file = "/absolute/path/outside/repos/keepflame/secrets/ikuuu-primary.cookie"
+# Public navigation pages whose (obfuscated) script lists the current domains.
+nav_seeds = ["https://ikuuu.bar/"]
+# Optional manual pin used before discovery; the cookie file's own base wins.
+# base_url = "https://ikuuu.pw"
+# host_pattern = '^ikuuu\.[a-z]{2,24}$'
+# max_probes = 8
+# timeout_seconds = 15
+# request_pause_seconds = 1.0
+
+# Slack delivery exists and stays off. This example holds no real webhook address.
+[notify.slack]
+enabled = false
+webhook_file = "/absolute/path/to/slack-webhook.url"
+timeout_seconds = 15

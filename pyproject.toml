@@ -17,6 +17,7 @@ keepflame = "keepflame.cli:main"
 
 [project.entry-points."keepflame.keepers"]
 joinquant = "keepflame.flames.joinquant:create_keeper"
+ikuuu = "keepflame.flames.ikuuu:create_keeper"
 
 [dependency-groups]
 dev = [
