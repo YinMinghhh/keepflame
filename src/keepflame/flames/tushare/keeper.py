@@ -4,7 +4,8 @@ One Keeper class serves three Flames selected by ``settings.task``:
 
 - ``sign``  : POST /wctapi/user_center/sign (DAILY_SIGN, +1)
 - ``view``  : GET /document/1?doc_id=9, then POST /wctapi/user_center/view (VIEW_NEW_DATA, +2)
-- ``guess`` : GET /wctapi/user_center/guess/current, vote with the majority (+1, +4 if right)
+- ``guess`` : GET /wctapi/user_center/guess/current, vote with the majority, random side on a tie
+  (+1, +4 if right)
 
 Every request goes to https://tushare.pro only. ``sign`` and ``view`` first read
 GET /wctapi/user_center/tasks and stop when the task is already completed, so a
@@ -16,9 +17,11 @@ gone and becomes WAITING_HUMAN; KeepFlame never logs in by itself.
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -48,7 +51,8 @@ TASKS = ("sign", "view", "guess")
 DEFAULT_TASK_CODES = {"sign": "DAILY_SIGN", "view": "VIEW_NEW_DATA"}
 POINTS = {"sign": "1", "view": "2", "guess": "1"}
 VOTE_UP, VOTE_DOWN = 1, 2
-TIE_POLICIES = ("defer", "up", "down")
+TIE_POLICIES = ("random", "up", "down")
+LOG = logging.getLogger(__name__)
 HUMAN_REASONS = {"session_expired", "cookie_unreadable", "cookie_invalid"}
 # TODO(T0): confirm the exact repeated sign/view wording once logged in. "已达上限"/"已完成"
 # come from the public shyz2006/tushare-checkin script; the others are tolerant guesses.
@@ -79,7 +83,7 @@ class _Settings:
             self.task_code = code
         elif "task_code" in settings:
             raise ValueError("task_code")
-        tie = settings.get("guess_tie", "defer")
+        tie = settings.get("guess_tie", "random")
         if tie not in TIE_POLICIES or (task != "guess" and "guess_tie" in settings):
             raise ValueError("guess_tie")
         self.guess_tie: str = tie
@@ -122,16 +126,28 @@ def _count(value) -> int | None:
     return None
 
 
-def majority_vote(up_votes, down_votes, tie: str = "defer") -> int | None:
-    """Follow the majority. A tie returns ``None`` (defer) unless a fixed side is configured."""
+def majority_vote(up_votes, down_votes, tie: str = "random",
+                  choose: Callable[[Sequence[int]], int] | None = None) -> tuple[int, bool]:
+    """Follow the majority; on an even split always vote anyway. Returns ``(vote, tied)``.
+
+    A tie uses ``tie``: ``"random"`` picks up or down with ``choose`` (injectable for tests),
+    ``"up"``/``"down"`` pin a side. The guess is never skipped.
+    """
     up, down = _count(up_votes), _count(down_votes)
     if up is None or down is None:
         raise ValueError("vote counts are missing or not numeric")
     if up > down:
-        return VOTE_UP
+        return VOTE_UP, False
     if down > up:
-        return VOTE_DOWN
-    return {"up": VOTE_UP, "down": VOTE_DOWN}.get(tie)
+        return VOTE_DOWN, False
+    if tie == "up":
+        return VOTE_UP, True
+    if tie == "down":
+        return VOTE_DOWN, True
+    side = (choose or random.SystemRandom().choice)((VOTE_UP, VOTE_DOWN))
+    if side not in (VOTE_UP, VOTE_DOWN):
+        raise ValueError("tie chooser must return 1 or 2")
+    return side, True
 
 
 def _retry_after(response: HttpResponse, now: datetime) -> datetime | None:
@@ -161,8 +177,11 @@ class _Stop(Exception):
 class TushareKeeper:
     business_timezone = "Asia/Shanghai"
 
-    def __init__(self, *, sleeper: Callable[[float], None] = time.sleep) -> None:
+    def __init__(self, *, sleeper: Callable[[float], None] = time.sleep,
+                 choose: Callable[[Sequence[int]], int] | None = None) -> None:
         self.sleeper = sleeper
+        # Picks the side on a tied guess; tests inject a seeded or fixed chooser.
+        self.choose = choose or random.SystemRandom().choice
 
     # -- results --------------------------------------------------------------------
     @staticmethod
@@ -381,14 +400,19 @@ class TushareKeeper:
             return self._success("guess", "Tushare guess is not open; nothing to vote",
                                  {**metadata, "guess_state": "not_open"}, now, claimed=False)
         try:
-            vote = majority_vote(period.get("up_votes"), period.get("down_votes"), settings.guess_tie)
+            vote, tied = majority_vote(period.get("up_votes"), period.get("down_votes"), settings.guess_tie,
+                                       self.choose)
         except ValueError:
             return self._failed("guess", "guess_votes_unreadable", metadata)
-        if vote is None:
-            # Even split: wait for others to vote and retry on the FAILED schedule; never pick a side blindly.
-            return self._failed("guess", "guess_tie_deferred", {**metadata, "guess_state": "tie_deferred"},
-                                message="Tushare guess is tied; deferred to the next retry")
-        metadata["vote"] = vote
+        direction = "up" if vote == VOTE_UP else "down"
+        metadata.update({"vote": vote, "vote_direction": direction, "tie": tied,
+                         "tie_policy": settings.guess_tie if tied else None})
+        # One line per actual vote: direction, counts and tie flag. Never the cookie.
+        LOG.info("tushare_guess_vote %s", json.dumps({
+            "flame_id": context.flame_id, "trade_date": metadata["trade_date"], "vote": vote,
+            "direction": direction, "up_votes": metadata["up_votes"], "down_votes": metadata["down_votes"],
+            "tie": tied, "tie_policy": metadata["tie_policy"],
+        }, ensure_ascii=False))
         self._pause(settings)
         result = self._api(context, http, settings, cookie, "guess", "POST", GUESS_VOTE_URL, "vote", metadata, now,
                            body={"vote": vote})
@@ -398,5 +422,6 @@ class TushareKeeper:
         if recorded is not None and recorded != vote:
             return self._failed("guess", "guess_vote_mismatch", metadata)
         side = "看涨" if vote == VOTE_UP else "看跌"
-        return self._success("guess", f"Tushare guess voted {side} with the majority",
+        how = f"on a tie ({settings.guess_tie})" if tied else "with the majority"
+        return self._success("guess", f"Tushare guess voted {side} {how}",
                              {**metadata, "guess_state": "voted_now"}, now, claimed=True)

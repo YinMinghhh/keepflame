@@ -19,7 +19,8 @@
    - `user_guess.vote` 已有值 → SUCCESS（`already_voted`）。
    - `period.status != 1`（2 待开奖、3 已开奖）→ SUCCESS（`not_open`），不投票。
    - `status == 1` 且未投 → 投票数多的一方：`up_votes > down_votes` 投 `{"vote":1}`（看涨），反之投 `{"vote":2}`（看跌）。
-   - 票数相等：默认 `guess_tie = "defer"`，本次记 FAILED（`guess_tie_deferred`），按 `retry_minutes` 稍后重看，等别人投出差距再跟。可改成 `"up"` 或 `"down"` 固定一边。
+   - 票数相等：照样投票，从不跳过。默认 `guess_tie = "random"`，随机投看涨或看跌；可改成 `"up"` 或 `"down"` 固定一边。
+   - 每次实际投票都写一行日志 `tushare_guess_vote {...}`（方向、看涨/看跌票数、是否平票、平票策略，不含 Cookie），同样的字段（`vote`、`vote_direction`、`up_votes`、`down_votes`、`tie`、`tie_policy`）也记在运行记录的元数据里。
 5. 结果分类：
    - 本次完成 → SUCCESS，`reward` 记本次领取的积分（签到 1、浏览 2、竞猜参与 1）。
    - 已完成 / 重复（任务列表 `is_completed`，或返回文案含“已达上限/已完成/已签到”等）→ SUCCESS，不重复调用。
@@ -39,7 +40,7 @@
 | `cookie_file` | 是 | — | 绝对路径，放在仓库外；三个 Flame 共用 |
 | `task_code` | 否 | `DAILY_SIGN` / `VIEW_NEW_DATA` | 任务列表里的 `task_code`，仅 `sign` / `view` |
 | `verify_after_action` | 否 | `true` | 动作后再读任务列表，要求 `is_completed=true` |
-| `guess_tie` | 否 | `defer` | 仅 `guess`：`defer` / `up` / `down` |
+| `guess_tie` | 否 | `random` | 仅 `guess`：平票时 `random`（随机）/ `up` / `down`，总是投票 |
 | `timeout_seconds` | 否 | 15 | 3–60 |
 | `request_pause_seconds` | 否 | 1.0 | 0–10，请求之间的间隔 |
 

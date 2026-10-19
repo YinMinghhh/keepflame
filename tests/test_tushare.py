@@ -7,6 +7,8 @@ public shyz2006/tushare-checkin script and stays a T0 item until verified logged
 
 import io
 import json
+import logging
+import random
 import stat
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -96,10 +98,11 @@ def store_cookie(tmp_path, header=COOKIE):
     write_file(tmp_path / "tushare.cookie", SessionCookie(header))
 
 
-def run(tmp_path, http, *, task="sign", storage=None, notifier=None, config=None, now=NOW):
+def run(tmp_path, http, *, task="sign", storage=None, notifier=None, config=None, now=NOW, choose=None):
     storage = storage or MemoryStorage()
     notifier = notifier or FakeNotifier()
-    runner = Orchestrator(storage=storage, registry=StaticRegistry(TushareKeeper(sleeper=lambda _s: None)),
+    keeper = TushareKeeper(sleeper=lambda _s: None, choose=choose or (lambda _sides: pytest.fail("no tie expected")))
+    runner = Orchestrator(storage=storage, registry=StaticRegistry(keeper),
                           capabilities=CapabilityRegistry({"http": http}), secrets=FileSecretResolver(),
                           notifier=notifier, clock=FixedClock(now))
     outcome = runner.run_flame(config or flame(tmp_path, task), now=now)
@@ -332,6 +335,8 @@ def test_guess_votes_with_the_majority(tmp_path, up, down, expected):
     result = outcome.record.result
     assert result.status is KeepStatus.SUCCESS and result.metadata["guess_state"] == "voted_now"
     assert result.metadata["vote"] == expected and result.metadata["vote_confirmed"] is True
+    assert result.metadata["tie"] is False and result.metadata["tie_policy"] is None
+    assert result.metadata["vote_direction"] == ("up" if expected == 1 else "down")
     assert result.reward.amount == "1" and result.metadata["trade_date"] == "20261020"
     vote = http.requests[-1]
     assert json.loads(vote.body) == {"vote": expected} and vote.headers["Content-Type"].startswith("application/json")
@@ -353,18 +358,61 @@ def test_guess_skips_when_already_voted_or_not_open(tmp_path, routes_current, st
     assert result.reward is None and http.calls() == [("GET", GUESS_CURRENT_URL)]
 
 
-def test_guess_tie_defers_by_default_and_follows_a_configured_side(tmp_path):
+@pytest.mark.parametrize("picked", [1, 2])
+def test_guess_tie_always_votes_a_randomly_picked_side(tmp_path, picked, caplog):
     store_cookie(tmp_path)
-    http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=40, down=40)})
-    outcome, _, _ = run(tmp_path, http, task="guess")
-    assert outcome.record.result.status is KeepStatus.FAILED
-    assert outcome.record.result.metadata["reason"] == "guess_tie_deferred"
-    assert http.calls() == [("GET", GUESS_CURRENT_URL)]
+    offered = []
+
+    def choose(sides):
+        offered.append(tuple(sides))
+        return picked
+
+    after = respond({"code": 0, "data": {"user_guess": {"vote": picked}}})
+    http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=40, down="40"), ("POST", GUESS_VOTE_URL): after})
+    with caplog.at_level(logging.INFO, logger="keepflame.flames.tushare.keeper"):
+        outcome, _, notifier = run(tmp_path, http, task="guess", choose=choose)
+    result = outcome.record.result
+    assert offered == [(1, 2)]
+    assert result.status is KeepStatus.SUCCESS and result.metadata["guess_state"] == "voted_now"
+    assert json.loads(http.requests[-1].body) == {"vote": picked}
+    assert result.metadata["tie"] is True and result.metadata["tie_policy"] == "random"
+    assert result.metadata["vote_direction"] == ("up" if picked == 1 else "down")
+    assert "on a tie" in result.message and result.reward.amount == "1"
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("tushare_guess_vote ")]
+    logged = json.loads(line.split(" ", 1)[1])
+    assert logged == {"flame_id": "tushare-guess", "trade_date": "20261020", "vote": picked,
+                      "direction": "up" if picked == 1 else "down", "up_votes": 40, "down_votes": 40,
+                      "tie": True, "tie_policy": "random"}
+    assert "SYNTHETIC" not in line + dumped(outcome, notifier)
+
+
+def test_guess_tie_seeded_rng_reaches_both_sides(tmp_path):
+    store_cookie(tmp_path)
+    rng = random.Random(20261019)
+    seen = set()
+    for _ in range(32):
+        http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=0, down=0),
+                         ("POST", GUESS_VOTE_URL): respond({"code": 0, "data": {}})})
+        outcome, _, _ = run(tmp_path, http, task="guess", choose=rng.choice)
+        assert outcome.record.result.status is KeepStatus.SUCCESS
+        seen.add(json.loads(http.requests[-1].body)["vote"])
+    assert seen == {1, 2}
+
+
+def test_guess_majority_ignores_the_tie_chooser_and_pinned_side_overrides_random(tmp_path, caplog):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=10, down=11),
+                     ("POST", GUESS_VOTE_URL): respond({"code": 0, "data": {}})})
+    with caplog.at_level(logging.INFO, logger="keepflame.flames.tushare.keeper"):
+        outcome, _, _ = run(tmp_path, http, task="guess")  # chooser fails the test if consulted
+    assert json.loads(http.requests[-1].body) == {"vote": 2} and outcome.record.result.metadata["tie"] is False
+    assert '"tie": false' in caplog.text and '"direction": "down"' in caplog.text
     http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=0, down=0),
                      ("POST", GUESS_VOTE_URL): respond({"code": 0, "data": {}})})
     outcome, _, _ = run(tmp_path, http, config=flame(tmp_path, "guess", guess_tie="down"))
     assert outcome.record.result.status is KeepStatus.SUCCESS
     assert json.loads(http.requests[-1].body) == {"vote": 2}
+    assert outcome.record.result.metadata["tie_policy"] == "down"
     assert outcome.record.result.metadata["vote_confirmed"] is None
 
 
@@ -384,8 +432,13 @@ def test_guess_failures(tmp_path, routes, reason):
 
 
 def test_majority_vote_rules():
-    assert majority_vote(3, 1) == 1 and majority_vote(1, 3) == 2
-    assert majority_vote(5, 5) is None and majority_vote(5, 5, "up") == 1 and majority_vote("2", "2", "down") == 2
+    assert majority_vote(3, 1) == (1, False) and majority_vote(1, 3) == (2, False)
+    assert majority_vote(5, 5, choose=lambda sides: sides[-1]) == (2, True)
+    assert majority_vote(5, 5, choose=lambda sides: sides[0]) == (1, True)
+    assert majority_vote(5, 5, "up") == (1, True) and majority_vote("2", "2", "down") == (2, True)
+    assert majority_vote(5, 5)[0] in (1, 2)  # default: real randomness, still always a vote
+    with pytest.raises(ValueError):
+        majority_vote(5, 5, choose=lambda sides: 3)
     for bad in ((None, 1), (True, 1), (-1, 2), ("x", 1)):
         with pytest.raises(ValueError):
             majority_vote(*bad)

@@ -76,8 +76,9 @@ stop_at = "23:00"
 [flames.settings]
 task = "guess"
 cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.cookie"
-# Even up/down split: "defer" (default) waits for the next retry; "up" or "down" picks a side.
-# guess_tie = "defer"
+# Even up/down split: always vote. "random" (default) picks up or down at random;
+# "up" or "down" pins a side.
+# guess_tie = "random"
 
 # Slack delivery exists and stays off. This example holds no real webhook address.
 [notify.slack]
