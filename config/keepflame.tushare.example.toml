@@ -1,0 +1,86 @@
+# Safe example only. Holds no cookie, no webhook address and no account data.
+# Copy to a *.local.toml (or outside the repo) before a real run.
+# Three Flames share one Tushare account and one cookie file, split like the
+# JoinQuant sign-in / reading Flames: sign (+1), view (+2), guess (+1, +4 if right).
+[storage]
+path = "../var/keepflame-tushare.sqlite3"
+
+[[flames]]
+id = "tushare-sign"
+keeper = "tushare"
+account_id = "primary"
+enabled = false
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+# Random daily start in [09:00, 10:30); FAILED results retry after 30/60/120 min.
+first_window_start = "09:00"
+first_window_end = "10:30"
+retry_minutes = [30, 60, 120]
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+task = "sign"
+# Absolute path OUTSIDE any git checkout, shared by all three Flames. Written by
+#   pbpaste | keepflame tushare import-cookie
+# with mode 600. Never put the cookie itself in this TOML file.
+cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.cookie"
+# task_code = "DAILY_SIGN"        # task_code in GET /wctapi/user_center/tasks
+# verify_after_action = true      # re-read the task list and require is_completed
+# timeout_seconds = 15
+# request_pause_seconds = 1.0
+
+[[flames]]
+id = "tushare-view"
+keeper = "tushare"
+account_id = "primary"
+enabled = false
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+first_window_start = "09:00"
+first_window_end = "10:30"
+retry_minutes = [30, 60, 120]
+after_flame = "tushare-sign"
+min_gap_minutes = 5
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+task = "view"
+cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.cookie"
+# task_code = "VIEW_NEW_DATA"
+
+[[flames]]
+id = "tushare-guess"
+keeper = "tushare"
+account_id = "primary"
+enabled = false
+
+[flames.schedule]
+timezone = "Asia/Shanghai"
+# The guess for trade day T is open from T-1 15:05 to T 13:00. Latest first run is
+# about 10:40; retries 20/40/60 min end by about 12:40, before voting closes.
+first_window_start = "09:00"
+first_window_end = "10:30"
+retry_minutes = [20, 40, 60]
+after_flame = "tushare-sign"
+min_gap_minutes = 10
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+
+[flames.settings]
+task = "guess"
+cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.cookie"
+# Even up/down split: "defer" (default) waits for the next retry; "up" or "down" picks a side.
+# guess_tie = "defer"
+
+# Slack delivery exists and stays off. This example holds no real webhook address.
+[notify.slack]
+enabled = false
+webhook_file = "/absolute/path/to/slack-webhook.url"
+timeout_seconds = 15

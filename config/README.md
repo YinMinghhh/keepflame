@@ -17,3 +17,5 @@
 现在所有样例默认停用，且 CLI run/run-once 必须显式 --execute 才能运行。`task="checkin"` 与 `task="reading"` 独立配置，不允许同 keeper/account/task 重复。阅读只接受指定公开文章 URL，禁止搜索、自动挑选或付费文章；字段和边界由聚宽插件校验。服务器候选见 deploy/。
 
 `keepflame.ikuuu.example.toml` 声明但默认停用 ikuuu 每日签到，只引用仓库外的 Cookie 文件路径和公开导航页种子；字段见 `src/keepflame/flames/ikuuu/README.md`。
+
+`keepflame.tushare.example.toml` 声明但默认停用 Tushare 每日积分的三个 Flame（签到、浏览上新、猜涨跌），共用一个仓库外的 Cookie 文件路径；字段见 `src/keepflame/flames/tushare/README.md`。
