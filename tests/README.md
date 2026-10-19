@@ -22,8 +22,10 @@
 
 `test_daemon_dispatch.py` 验证 CLI 到现有 daemon 的单次任务队列，包括独立客户端 Python 进程退出、并发 UUID 去重、容量/期限、配置/账号绑定、原有暂停/排期/退避、调度冲突、异常与信号退出、重启不重放，以及 v3→v4 保留历史和 pending。信号测试调用合成 handler，崩溃测试构造新库中的在途状态；不终止真实进程、不读取真实状态库。
 
-`test_daemon_dispatch_browser.py` 另有两个 opt-in Chrome 场景：合成正式登录后，CLI 签到/阅读任务沿原上下文及未改动的聚宽门禁运行；阅读中的未知 POST 被拒绝并保留 pending。另一个主动关闭自己的合成 context，验证后续任务停止且不自动重建。只用空临时 profile、合成 HttpOnly Cookie、内存传输；不包含真实认证、跨日有效期、跨进程会话恢复或领取成功验收。应通过受限验证脚本禁用 DNS 并设置关闭的回环代理；不得为了用例通过放宽生产路由。
+`test_daemon_dispatch_browser.py` 另有两个 opt-in Chrome 场景：合成正式登录后，CLI 签到/阅读任务沿原上下文及未改动的聚宽门禁运行；阅读中的未知 POST 被拒绝并保留 pending。另一个主动关闭自己的合成 context（模拟手动退出 Chrome），验证池在交出任务页前只重启一次，阅读仍在原门禁下运行并拦截未知写入。只用空临时 profile、合成 HttpOnly Cookie、内存传输；不包含真实认证、跨日有效期、跨进程会话恢复或领取成功验收。应通过受限验证脚本禁用 DNS 并设置关闭的回环代理；不得为了用例通过放宽生产路由。
 
 `test_daemon_owner_liveness.py` 覆盖独立复核的P2：合成daemon子进程os._exit后，普通run-once子进程持通用锁，第三个CLI客户端必须拒绝入队。`daemon_owner_process.py` 只允许新建测试目录内写入，拒绝浏览器、网络、真实账户文件，并为握手设置超时。另检查专属锁的世代绑定、非法owner拒绝、0600/空文件、崩溃残留不代表活性，以及浏览器关闭前两把锁均保留。正常交接、UUID幂等和重启不重放继续由既有定点测试覆盖。
 
 `test_ikuuu.py` 离线覆盖 ikuuu 插件：用真实公开导航页夹具锁定混淆脚本静态解码，假 HTTP 覆盖域名发现（导航镜像不误判、最终主机校验、探测预算）、Cookie 导入解析与 600 原子写入、签到成功/已签到/会话过期/域名变化/错误分类、同日不重复联网、Slack Action-URL 及 CLI 不回显 Cookie 值。全部 Cookie 为自造值，不联网、不签到。
+
+`test_browser_liveness.py` 用假浏览器复现 10/18 手动退出专用 Chrome 的事故：任务页前检测断开（close 事件或 new_page 的 TargetClosedError）后拆除并重启一次，重启失败报 `browser_unavailable`（FAILED，走 30/60/120 有限重试，不暂停）；恢复会话模式不静默重启；存活浏览器的普通错误和清理失败仍按原规则停止。还检查兜底异常只记录类型和固定分类（不含 URL/Cookie）、`pre_request_failure` 运行留下的 flame 暂停次日自动解除而缺少证据的旧记录仍需显式 resume，以及仅 HTTP 的 ikuuu flame 不再把 owner 日志的 `browser_headless` 变成 false。

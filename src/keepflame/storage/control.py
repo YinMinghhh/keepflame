@@ -8,7 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from keepflame.core.eligibility import zero_claim_pending_allows_new_day, zero_claim_pending_allows_retry
+from keepflame.core.eligibility import (
+    pre_request_failure_allows_new_day, zero_claim_pending_allows_new_day, zero_claim_pending_allows_retry,
+)
 from keepflame.core.models import ActionAttempt
 
 
@@ -248,6 +250,9 @@ class ControlStorageMixin:
             today = now.astimezone(ZoneInfo(zone_name)).date().isoformat()
         except Exception:
             return False
+        if pre_request_failure_allows_new_day(day, metadata, today):
+            # Nothing was requested or reserved; an older pending row keeps its own guard.
+            return True
         if not zero_claim_pending_allows_new_day(day, "pending", metadata, today):
             return False
         return not self._archived_action_blocks_release(

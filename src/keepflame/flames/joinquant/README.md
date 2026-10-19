@@ -33,6 +33,8 @@ reading_scroll = true              # 等待中一次缓慢向下滚动
 
 ## 会话、图像与隐私
 
+浏览器池在交出任务页或登录页前检查专用 Chrome 是否仍连接（Playwright close 事件；new_page 抛 TargetClosedError 时也视为断开）。断开时拆除该账号上下文并按原可见模式重启一次；重启失败抛 `BrowserDisconnected`，Keeper 记为 FAILED / `browser_unavailable`，走核心有限重试，不暂停。恢复会话模式（`--restore-browser-session`）不静默重启。任务页 gateway 尚未创建且未预留动作的失败都标记 `pre_request_failure`，不写 automation_paused；若这类运行仍留下 flame 暂停，下一业务日自动解除。兜底异常只记录 `error_type` 与固定分类 `error_detail`（如 target_closed、timeout、net::ERR_*），不记录异常原文、URL 或 Cookie。
+
 每轮只关闭任务页面，然后移除本轮注册的 route handler，保留 capability 所拥有的账号上下文；不能把旧门禁残留到下一轮。专用登录、长期浏览器生命周期及暂停恢复由 capability/Core 管理。人工登录窗口放行官方登录验证码 `/common/verifyCode/`（登录滑块、图形码和短信），否则登录按钮会停在验证码请求上且页面没有错误提示。同一窗口仍阻断 `/credits/`、`/user/account/getToken` 和 `/community/post/postView`，不能在登录过程中领取积分或登记阅读。关闭浏览器后，该 profile 会留下聚宽响应中没有有效期的 HttpOnly 会话 Cookie，并只在这个目录里补上有限有效期；下一个使用同一 profile 的进程会在同源请求中带上它。Cookie 值不进入日志、profile 以外的文件或其他账号 profile，也不复制开发机 profile。远端返回 10001 时仍是等待人工，本地保留不是登录成功。真实登录、阅读或领取均须另外授权，本插件测试不要求本人操作。
 
 拼图从响应内存解码，Pillow 图像以 finally/ExitStack 关闭，求解后的图像 URI 引用及时释放；没有真实图片文件或调试截图。浏览器自己的缓存、崩溃日志和 profile 不因此保证完全无落盘；不删除既存用户数据以制造该保证。

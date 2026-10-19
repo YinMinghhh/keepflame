@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 import json
+import re
 import time
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from keepflame.capabilities.browser import BrowserUnavailable, ProfileNotAuthorized
+from keepflame.capabilities.browser import BrowserDisconnected, BrowserUnavailable, ProfileNotAuthorized
 from keepflame.capabilities.http import HttpResponse
 from keepflame.core.models import HumanAction, KeepResult, KeepStatus, Reward, RewardSource
 from keepflame.flames.joinquant.keeper import JOINQUANT_ORIGIN, SIGNIN_PAGE_URL, JoinQuantKeeper, _unique_json_object
@@ -20,6 +21,51 @@ from keepflame.flames.joinquant.discovery import discover as discover_article
 from keepflame.flames.joinquant.day import BusinessDayFence
 from keepflame.core.models import CompletionReceipt
 from keepflame.flames.joinquant.history import credit_evidence, fetch_credit_history
+
+
+# Exception text may carry page data, URLs or cookies, so it is never logged
+# verbatim. Only these fixed phrases are recognized; anything else is
+# "unclassified". Network errors keep just their net::ERR_* code.
+_ERROR_PHRASES = (
+    ("has been closed", "target_closed"),
+    ("target closed", "target_closed"),
+    ("browser has disconnected", "browser_disconnected"),
+    ("connection closed", "connection_closed"),
+    ("frame was detached", "frame_detached"),
+    ("execution context was destroyed", "execution_context_destroyed"),
+    ("timeout", "timeout"),
+    ("timed out", "timeout"),
+    ("navigation", "navigation_failed"),
+    ("relaunch failed", "browser_relaunch_failed"),
+    ("relaunched browser closed again", "browser_relaunch_closed"),
+    ("account is busy", "browser_busy"),
+    ("pool is closed", "browser_pool_closed"),
+    ("account limit", "browser_account_limit"),
+    ("cleanup failed", "browser_cleanup_failed"),
+)
+_NET_ERROR = re.compile(r"net::(ERR_[A-Z_]{1,64})")
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def error_type_name(exc: BaseException) -> str:
+    name = type(exc).__name__
+    return name if _TYPE_NAME.fullmatch(name) else "Exception"
+
+
+def sanitized_error(exc: BaseException) -> str:
+    """A fixed category for an exception; never its free text, URLs or cookies."""
+    try:
+        text = str(exc).split("\n", 1)[0]
+    except Exception:
+        return "unclassified"
+    network = _NET_ERROR.search(text)
+    if network:
+        return "net::" + network.group(1)
+    lowered = text.casefold()
+    for phrase, label in _ERROR_PHRASES:
+        if phrase in lowered:
+            return label
+    return "unclassified"
 
 
 def _checkin_write_submitted(task_name, stage_counts) -> bool:
@@ -598,8 +644,16 @@ class JoinQuantBrowserKeeper:
                         gateway.close()
         except ProfileNotAuthorized:
             result = self._stop(context, "profile_not_enrolled", human=True)
-        except BrowserUnavailable:
-            result = self._stop(context, "browser_unavailable", human=True)
+        except BrowserUnavailable as exc:
+            # A quit/crashed Chrome that could not be relaunched, a busy account or a
+            # stopped pool. Before a task page exists nothing was sent: retry on the
+            # bounded ladder instead of pausing. Later it keeps the old stop.
+            result = self._stop(context, "browser_unavailable", human=gateway is not None,
+                                paused=gateway is not None)
+            result = replace(result, metadata={
+                **result.metadata, "error_type": error_type_name(exc),
+                "error_detail": sanitized_error(exc),
+                **({"browser_disconnected": True} if isinstance(exc, BrowserDisconnected) else {})})
         except ImportError:
             result = self._stop(context, "browser_dependencies_missing", human=True)
         except MatchError as exc:
@@ -612,8 +666,11 @@ class JoinQuantBrowserKeeper:
                                 paused=progress["reserved"] or exc.status not in (429, 502, 503, 504))
             if exc.blocked_request is not None:
                 result = replace(result, metadata={**result.metadata, "blocked_request": exc.blocked_request})
-        except Exception:
+        except Exception as exc:
             result = self._stop(context, "browser_operation_failed", paused=True)
+            # Exception type plus a fixed category; never the free text, URLs or cookies.
+            result = replace(result, metadata={**result.metadata, "error_type": error_type_name(exc),
+                                               "error_detail": sanitized_error(exc)})
         if completed is not None and result is not completed:
             # A cleanup failure does not undo an already verified reward. Pause
             # resource reuse while preserving its receipt and daily write budget.
@@ -641,6 +698,12 @@ class JoinQuantBrowserKeeper:
                 "blocked_algorithm_list": counts["blocked_algorithm_list"],
                 "blocked_page_status": counts["blocked_page_status"],
             }
+        if gateway is None and not progress["reserved"] and completed is None:
+            # No task page gateway means no guarded request and no reservation:
+            # an infrastructure failure. It retries on the bounded ladder and
+            # never leaves a pause that only an explicit resume could clear.
+            metadata.pop("automation_paused", None)
+            metadata["pre_request_failure"] = True
         stage_counts = metadata.get("stage_counts")
         # Nothing was submitted. Do not pause a releasable zero-claim attempt.
         # An archived pending, or a confirmation the storage rejected, stays stopped.
