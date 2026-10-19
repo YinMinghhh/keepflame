@@ -5,11 +5,25 @@ use the same context, so no cookie export or cross-process handoff is needed.
 """
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import get_ident
 from urllib.parse import urlsplit
 
-from keepflame.capabilities.browser import BrowserUnavailable, BrowserRestoreFailed, IsolatedBrowser, ProfileNotAuthorized
+from keepflame.capabilities.browser import (
+    BrowserDisconnected, BrowserUnavailable, BrowserRestoreFailed, IsolatedBrowser, ProfileNotAuthorized,
+)
+
+# Playwright reports a quit browser, crashed renderer or closed context with
+# TargetClosedError (or a plain Error naming the closed target).
+_CLOSED_MARKERS = ("has been closed", "target closed", "browser closed", "browser has disconnected",
+                   "connection closed")
+
+
+def _closed_error(exc):
+    if type(exc).__name__ == "TargetClosedError":
+        return True
+    message = str(exc).split("\n", 1)[0].casefold()
+    return any(marker in message for marker in _CLOSED_MARKERS)
 
 
 @dataclass
@@ -22,6 +36,9 @@ class _Context:
     login_handler: object | None = None
     permit_page: object | None = None
     proof_url: str | None = None
+    visible: bool = False
+    stack: ExitStack = field(default_factory=ExitStack)
+    disconnected: bool = False
 
 
 class BrowserPool:
@@ -35,6 +52,8 @@ class BrowserPool:
         self._closed = False
         self.close_reason = None
         self.launch_count = 0
+        self.relaunch_count = 0
+        self.last_disconnect = None
 
     @property
     def closed(self):
@@ -51,22 +70,34 @@ class BrowserPool:
         if slot is not None:
             if slot.identity != identity:
                 raise ProfileNotAuthorized("browser profile is already bound to another identity")
+            if not slot.busy and slot.login_page is None and not self._alive(slot):
+                # The dedicated Chrome was quit or crashed since the last run.
+                return self._relaunch(slot, "disconnected_before_use")
             return slot
         if len(self._contexts) >= self.max_accounts:
             raise BrowserUnavailable("browser account limit reached")
+        return self._launch(identity, visible=visible)
+
+    def _launch(self, identity, *, visible):
+        profile_dir, account_id, origin = identity
+        slot_stack = ExitStack()
         try:
             # A visible request wins over a headless pool. JoinQuant asks for that.
             launch_headless = False if visible else self.headless
-            owned = self._stack.enter_context(self.browser.session(
+            owned = slot_stack.enter_context(self.browser.session(
                 profile_dir=profile_dir, account_id=account_id, origin=origin, headless=launch_headless))
             self.launch_count += 1
         except Exception as exc:
             if isinstance(exc, BrowserRestoreFailed) or getattr(self.browser, 'restore_session', False):
                 self.close(reason="restore_startup_failed")
             raise
+        # Pool close also closes this slot; closing an already closed slot is a no-op.
+        self._stack.push(slot_stack)
         context = owned.page.context
-        slot = _Context(context, identity, permit_page=getattr(owned, 'permit_page', None))
+        slot = _Context(context, identity, permit_page=getattr(owned, 'permit_page', None),
+                        visible=visible, stack=slot_stack)
         self._contexts[profile_dir] = slot
+        self._watch(slot)
 
         def owned_page_only(route):
             # Deny idle traffic, popups and workers before the origin allowlist.
@@ -89,6 +120,85 @@ class BrowserPool:
             raise BrowserUnavailable("browser startup cleanup failed") from None
         return slot
 
+    @staticmethod
+    def _watch(slot):
+        """Mark the slot dead when Playwright reports the context or browser closing."""
+        def mark(*_args):
+            slot.disconnected = True
+
+        subscribe = getattr(slot.context, "on", None)
+        if callable(subscribe):
+            try:
+                subscribe("close", mark)
+            except Exception:
+                pass
+        browser = getattr(slot.context, "browser", None)
+        subscribe = getattr(browser, "on", None) if browser is not None else None
+        if callable(subscribe):
+            try:
+                subscribe("disconnected", mark)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _alive(slot):
+        if slot.disconnected:
+            return False
+        try:
+            browser = getattr(slot.context, "browser", None)
+            connected = getattr(browser, "is_connected", None) if browser is not None else None
+            if callable(connected) and connected() is False:
+                return False
+            closed = getattr(slot.context, "is_closed", None)
+            if callable(closed) and closed() is True:
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _discard(self, slot):
+        """Tear down a dead slot only. Its gates die with the closed context."""
+        if self._contexts.get(slot.identity[0]) is slot:
+            del self._contexts[slot.identity[0]]
+        slot.disconnected = True
+        try:
+            slot.stack.close()
+        except Exception:
+            # A dead Chrome cannot close cleanly; the driver still stops.
+            pass
+
+    def _relaunch(self, slot, why):
+        self.last_disconnect = why
+        self._discard(slot)
+        if getattr(self.browser, 'restore_session', False):
+            # A restored owner is never launched again silently.
+            self.close(reason="browser_disconnected")
+            raise BrowserDisconnected("browser disconnected; restore owner is not relaunched")
+        try:
+            fresh = self._launch(slot.identity, visible=slot.visible)
+        except Exception as exc:
+            if isinstance(exc, ProfileNotAuthorized):
+                raise
+            raise BrowserDisconnected("browser relaunch failed: " + type(exc).__name__) from None
+        self.relaunch_count += 1
+        return fresh
+
+    def _new_page(self, slot):
+        """Open a page; a dead browser is relaunched once. No request precedes this."""
+        try:
+            return slot, slot.context.new_page()
+        except Exception as exc:
+            if not (_closed_error(exc) or not self._alive(slot)):
+                raise
+        slot = self._relaunch(slot, "disconnected_on_new_page")
+        try:
+            return slot, slot.context.new_page()
+        except Exception as exc:
+            if _closed_error(exc) or not self._alive(slot):
+                self._discard(slot)
+                raise BrowserDisconnected("relaunched browser closed again") from None
+            raise
+
     def open_visible(self, *, profile_dir, account_id, origin):
         """Open the dedicated window once. Later task pages reuse this context."""
         self._get(profile_dir, account_id, origin, visible=True)
@@ -101,7 +211,11 @@ class BrowserPool:
         slot.busy = True
         page = None
         try:
-            page = slot.context.new_page()
+            try:
+                slot, page = self._new_page(slot)
+            finally:
+                # A relaunch replaces the slot; mark the live one busy.
+                slot.busy = True
             slot.task_page = page
             if slot.permit_page is not None:
                 slot.permit_page(page)
@@ -112,7 +226,12 @@ class BrowserPool:
             try:
                 for owned_page in list(slot.context.pages):
                     owned_page.close()
-            except Exception:
+            except Exception as exc:
+                if _closed_error(exc) or not self._alive(slot):
+                    # The whole context is gone, so no page or gate outlives it.
+                    slot.busy = False
+                    self._discard(slot)
+                    raise BrowserDisconnected("browser closed during the task") from None
                 self.close(reason="security_cleanup_failed")
                 raise BrowserUnavailable("browser task cleanup failed") from None
             finally:
@@ -213,7 +332,13 @@ class BrowserPool:
             if slot.login_handler is not None:
                 slot.context.unroute('**/*', slot.login_handler)
             slot.login_handler = None
-        except Exception:
+        except Exception as exc:
+            if _closed_error(exc) or not self._alive(slot):
+                # The entire owned context already closed, so the gate cannot be bypassed.
+                slot.login_page = None
+                slot.login_handler = None
+                self._discard(slot)
+                raise BrowserDisconnected("browser closed during login") from None
             # Keep the gate until the entire owned context closes; never reuse it.
             self.close(reason="security_cleanup_failed")
             raise BrowserUnavailable("login cleanup failed; browser pool stopped") from None

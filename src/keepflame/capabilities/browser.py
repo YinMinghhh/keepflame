@@ -15,6 +15,14 @@ class BrowserUnavailable(RuntimeError):
     pass
 
 
+class BrowserDisconnected(BrowserUnavailable):
+    """The owned browser or its context went away and could not be relaunched.
+
+    Raised before any task request is sent, so callers treat it as a bounded,
+    retryable infrastructure failure rather than a pause.
+    """
+
+
 class BrowserRestoreFailed(BrowserUnavailable):
     """A failed restore invalidates its owner; never silently launch it again."""
 

@@ -70,6 +70,27 @@ def zero_claim_pending_allows_retry(action_day: object, state: object, metadata:
     )
 
 
+# Pauses the core adds for its own safety checks stay until an explicit resume.
+_CORE_SAFETY_STOPS = frozenset({"clock_regressed", "completion_receipt_missing_or_invalid"})
+
+
+def pre_request_failure(metadata: object) -> bool:
+    """A Keeper-declared failure before any task request or reservation.
+
+    It carries no stage counts because no guarded request path existed. Any
+    recorded count means a request path did exist and the claim rules apply.
+    """
+    return (isinstance(metadata, dict) and metadata.get("pre_request_failure") is True
+            and "stage_counts" not in metadata
+            and metadata.get("reason") not in _CORE_SAFETY_STOPS)
+
+
+def pre_request_failure_allows_new_day(action_day: object, metadata: object, today: object) -> bool:
+    """A flame pause left by a pre-request failure expires on a later business day."""
+    return (isinstance(action_day, str) and isinstance(today, str) and action_day < today
+            and pre_request_failure(metadata))
+
+
 def execution_paused(storage, keeper: str, account_id: str, flame_id: str, *, now) -> bool:
     """Whether this Flame should be skipped. Storage without the newer check stays strict."""
     checker = getattr(storage, "blocks_execution", None)

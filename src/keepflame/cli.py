@@ -243,6 +243,22 @@ def _run_daemon(runtime: Runtime) -> int:
     return 0
 
 
+def _owner_browser_headless(config, profile_targets) -> bool:
+    """Report the browser_headless setting of the flames that own a browser profile.
+
+    HTTP-only flames (e.g. ikuuu) have no browser and no browser_headless key;
+    they must not flip this report. The log value never changes how the
+    dedicated window launches: JoinQuant always asks for a visible window.
+    """
+    owned_profiles = {profile for profile, _account, _origin in profile_targets}
+    flags = [
+        flame.settings.get("browser_headless") is True
+        for flame in config.enabled_flames()
+        if flame.settings.get("browser_profile_dir") in owned_profiles
+    ]
+    return bool(flags) and all(flags)
+
+
 def _error(message: str, error_type: str) -> int:
     print(
         json.dumps(
@@ -409,13 +425,9 @@ def main(argv: list[str] | None = None) -> int:
             if profile_owner is not None:
                 from keepflame.capabilities.profile_owner import prepare_visible_owner
                 launches = prepare_visible_owner(runtime, profile_targets)
-                headless_flags = [
-                    flame.settings.get("browser_headless") is True
-                    for flame in runtime.config.enabled_flames()
-                ]
                 _owner_line(
                     "visible_owner", browser="visible", browser_window="visible",
-                    browser_headless=bool(headless_flags) and all(headless_flags),
+                    browser_headless=_owner_browser_headless(runtime.config, profile_targets),
                     browser_launches=launches, second_browser=False,
                 )
             with runtime.daemon_session():

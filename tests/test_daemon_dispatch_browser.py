@@ -94,7 +94,8 @@ def test_client_handoff_preserves_native_session_and_recovery_gates(tmp_path, mo
 
     def page_factory(page, **kwargs):
         pages.append(page)
-        assert page.context is contexts[0]
+        # Task pages always come from the newest owned context (a relaunch replaces it).
+        assert page.context is contexts[-1]
         return JoinQuantPage(page, request_fetch=fetch, **kwargs)
 
     class Keeper(JoinQuantKeeper):
@@ -130,26 +131,28 @@ def test_client_handoff_preserves_native_session_and_recovery_gates(tmp_path, mo
             runtime.poll_controls()
             assert len(pages) == 1
             if case == 'closed_context':
-                contexts[0].close()  # Abrupt loss is synthetic; never reopen automatically.
+                # Abrupt loss (e.g. the user quit Chrome). The pool relaunches once
+                # before handing out the task page; the guards stay installed.
+                contexts[0].close()
             reading, _ = client('reading')
             runtime.poll_controls()
             state = runtime.storage.get_state('reading','synthetic')
             assert state.status.value != 'SUCCESS'
             assert state.metadata['automation_paused']
-            if case == 'guarded_reading_failure':
-                assert state.metadata['reason'] == 'unexpected_write'
-                assert state.metadata['blocked_request']['endpoint'] == 'unknown'
-                assert runtime.storage.get_action('joinquant','synthetic','reading').state == 'pending'
-                assert len(pages) == 2 and all(p.is_closed() for p in pages)
-                assert document_auth == [True, True]
-                assert ('POST', '/synthetic/unknown-write') not in map(tuple, transport)
-            else:
-                assert len(pages) == 1 and document_auth == [True]
+            launches = 2 if case == 'closed_context' else 1
+            assert len(contexts) == launches and pool.relaunch_count == launches - 1
+            # Either way the guarded reading flow runs and its unknown write is stopped.
+            assert state.metadata['reason'] == 'unexpected_write'
+            assert state.metadata['blocked_request']['endpoint'] == 'unknown'
+            assert runtime.storage.get_action('joinquant','synthetic','reading').state == 'pending'
+            assert len(pages) == 2 and all(p.is_closed() for p in pages)
+            assert document_auth == [True, True]
+            assert ('POST', '/synthetic/unknown-write') not in map(tuple, transport)
             again, _ = client('reading')
             runtime.poll_controls()
             assert request(runtime, again)['state'] == 'rejected'
             assert request(runtime, again)['reason'] == 'automation_paused'
-            assert len(contexts) == 1
+            assert len(contexts) == launches
             assert runtime.storage.count_runs() == 2
         (tmp_path/'synthetic-evidence.json').write_text(json.dumps({
             'case':case,'browser_launches':len(contexts),'task_pages':len(pages),
