@@ -553,3 +553,40 @@ def test_keeper_is_registered_as_an_entry_point():
     from keepflame.core.plugins import EntryPointKeeperRegistry
 
     assert isinstance(EntryPointKeeperRegistry().resolve("tushare"), TushareKeeper)
+
+
+QUOTED = 'uid="SYNTHETIC|quoted:value=="; sid=plain'
+
+
+def test_rfc6265_quoted_cookie_value_is_accepted_and_kept_verbatim(tmp_path):
+    assert parse_import(QUOTED).header == QUOTED
+    assert parse_import("Cookie: " + QUOTED + ";").header == QUOTED
+    assert parse_import('uid=""').header == 'uid=""'
+    exported = json.dumps([{"name": "uid", "value": '"SYNTHETIC|quoted:value=="', "domain": ".tushare.pro"},
+                           {"name": "sid", "value": "plain", "domain": "tushare.pro"}])
+    assert parse_import(exported).header == QUOTED
+    path = tmp_path / "tushare.cookie"
+    write_file(path, parse_import(QUOTED))
+    assert load_file(FileSecretResolver().read_text(str(path))).header == QUOTED
+
+
+def test_quoted_cookie_value_import_and_send_keep_the_quotes(tmp_path):
+    store_cookie(tmp_path, header=QUOTED)
+    http = FakeHttp({("GET", TASKS_URL): tasks(sign=True)})
+    outcome, _, _ = run(tmp_path, http)
+    assert outcome.record.result.status is KeepStatus.SUCCESS
+    assert http.requests[0].headers["Cookie"] == QUOTED
+    out = io.StringIO()
+    args = SimpleNamespace(config=config_file(tmp_path), flame=None, from_clipboard=False)
+    assert import_cookie(args, stdin=Pipe(QUOTED + "\n"), out=out) == 0
+    assert load_file((tmp_path / "tushare.cookie").read_text()).header == QUOTED
+    assert "SYNTHETIC" not in out.getvalue()
+
+
+@pytest.mark.parametrize("bad", ['uid="abc', 'uid=abc"', 'uid="a"b"', 'uid=a"b', 'uid="a b"', 'uid="a\\b"',
+                                 'uid="a,b"', 'uid=""x""', 'uid="'])
+def test_unbalanced_or_embedded_quotes_are_still_rejected(bad):
+    with pytest.raises(CookieError):
+        parse_import(bad)
+    with pytest.raises(CookieError):
+        parse_import(json.dumps([{"name": "uid", "value": bad.split("=", 1)[1], "domain": "tushare.pro"}]))

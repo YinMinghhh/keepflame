@@ -13,7 +13,9 @@ from pathlib import Path
 from keepflame.flames.ikuuu.discovery import DEFAULT_HOST_PATTERN, normalize_base
 
 MAX_COOKIE_CHARS = 8192
-_PAIR = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[^;\s,\\\"]*$")
+# RFC 6265: cookie-value = *cookie-octet / ( DQUOTE *cookie-octet DQUOTE ). A wholly quoted
+# value (Tushare's uid="...") is accepted and kept verbatim, quotes included, when sent.
+_PAIR = re.compile(r'^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+=(?:"[^;\s,\\"]*"|[^;\s,\\"]*)$')
 
 
 class CookieError(ValueError):

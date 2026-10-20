@@ -456,3 +456,18 @@ def test_example_config_loads_and_settings_validate():
     settings = _Settings(flame_config.settings)
     assert settings.seeds == ("https://ikuuu.bar/",) and settings.base_url is None
     assert config.slack is None or config.slack.enabled is False
+
+
+def test_rfc6265_quoted_cookie_value_is_accepted_and_kept_verbatim(tmp_path):
+    quoted = 'uid="SYNTHETIC|quoted=="; key=plain'
+    assert parse_import(quoted).header == quoted
+    exported = json.dumps([{"name": "uid", "value": '"SYNTHETIC|quoted=="', "domain": "ikuuu.pw"},
+                           {"name": "key", "value": "plain", "domain": "ikuuu.pw"}])
+    parsed = parse_import(exported)
+    assert parsed.header == quoted and parsed.base_url == "https://ikuuu.pw"
+    path = tmp_path / "ikuuu.cookie"
+    write_file(path, SessionCookie(quoted, "https://ikuuu.pw"))
+    assert load_file(FileSecretResolver().read_text(str(path))).header == quoted
+    for bad in ('uid="abc', 'uid=abc"', 'uid="a"b"', 'uid=a"b', 'uid="a,b"', 'uid="'):
+        with pytest.raises(CookieError):
+            parse_import(bad)
