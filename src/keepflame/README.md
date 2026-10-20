@@ -12,4 +12,4 @@
 
 当前 `cli.py` 提供 `run`、`run-once`、`status` 和 `health`，`runtime.py` 是具体 Capability、Storage、Notifier 与 Core 的唯一组装入口。
 
-`run-once --via-daemon --flame ID --request-id UUID` 将单次任务送到现有 daemon 的 SQLite 队列，仍需 `--execute` 才入队。Runtime 持有执行锁和进程内浏览器池，串行处理有界请求；客户端不建立 Runtime、不借用调试端口，也不关闭 owner 的上下文。所有者退出收拢请求并关闭自有资源，借用 Runtime 不关闭外部 pool。没有跨进程浏览器恢复或凭据复制。状态和 stdout 生命周期事件仅记录本地请求/owner 标识、固定状态与原因。
+`run-once --via-daemon --flame ID --request-id UUID` 将单次任务送到现有 daemon 的 SQLite 队列，仍需 `--execute` 才入队。Runtime 持有执行锁和进程内浏览器池，串行处理有界请求；客户端不建立 Runtime、不借用调试端口，也不关闭 owner 的上下文。所有者退出收拢请求并关闭自有资源，借用 Runtime 不关闭外部 pool。没有跨进程浏览器恢复或凭据复制。状态和 stdout 生命周期事件仅记录本地请求/owner 标识、固定状态与原因。`--force` 只跳过未到点检查，语义见根目录 README。`runtime.py` 把配置的绝对路径交给 `KeeperContext.config_path`，供 Keeper 在人工操作命令里写出 `--config`。

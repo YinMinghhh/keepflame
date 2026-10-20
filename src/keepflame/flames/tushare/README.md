@@ -59,7 +59,7 @@
    # 终端交互时不加管道，会以不回显方式提示粘贴
    ```
 
-   命令把文件原子写为 mode 600，拒绝仓库内路径和符号链接，只打印 Cookie 名称与指纹，不打印值。下一次计划运行即会继续三项任务，也可以 `keepflame run-once --flame tushare-sign --execute` 立即试一次。
+   命令把文件原子写为 mode 600，拒绝仓库内路径和符号链接，只打印 Cookie 名称与指纹，不打印值。下一次计划运行即会继续三项任务，服务在跑时可以 `keepflame run-once --config /path/to/keepflame.toml --flame tushare-sign --via-daemon --force --execute` 立即试一次（服务停着时用 `run-once --config ... --flame tushare-sign --execute`）。告警里的导入命令已带上服务实际使用的 `--config` 路径，可直接复制。
 
 4. 在别处退出登录或修改密码可能让这份 Cookie 失效；失效时会收到“Tushare 登录会话已失效”提醒，重复以上步骤即可。
 

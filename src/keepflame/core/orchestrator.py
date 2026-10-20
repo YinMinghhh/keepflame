@@ -47,7 +47,9 @@ class Orchestrator:
         secrets: SecretResolver,
         notifier: Notifier,
         clock: Clock | None = None,
+        config_path: str | None = None,
     ) -> None:
+        self.config_path = config_path
         self.storage = storage
         self.registry = registry
         self.capabilities = capabilities
@@ -62,7 +64,18 @@ class Orchestrator:
         now: datetime | None = None,
         notify: bool = True,
         business_target: BusinessTarget | None = None,
+        forced: bool = False,
+        scheduled_due: datetime | None = None,
     ) -> RunOutcome:
+        """Run one Flame now.
+
+        ``forced`` marks an operator-forced daemon run (``run-once --via-daemon --force``).
+        ``scheduled_due`` is the due time the run was forced ahead of; when it is set a
+        FAILED result neither spends the day's retry budget nor moves the schedule
+        earlier: the Flame keeps its planned ``scheduled_due`` (or a later Keeper floor).
+        """
+        if scheduled_due is not None and not forced:
+            raise ValueError("scheduled_due is only meaningful for a forced run")
         if execution_paused(self.storage, flame.keeper, flame.account_id, flame.id, now=now or self.clock.now()):
             raise AutomationPaused("automation is paused; inspect status and resume explicitly")
         started_at = (now or self.clock.now()).astimezone(timezone.utc)
@@ -94,6 +107,7 @@ class Orchestrator:
                 clock=self.clock,
                 business_target=target,
                 completion_receipt=issue_receipt,
+                config_path=self.config_path,
             )
             result = keeper.keep(context)
         except Exception as exc:
@@ -119,7 +133,10 @@ class Orchestrator:
             result = replace(result, metadata={**result.metadata, "automation_paused": True,
                              "reason": "clock_regressed"})
         same_target = previous is not None and previous.last_checked_target == target
-        failures = (previous.consecutive_failures if same_target else 0) + 1
+        ahead = scheduled_due is not None
+        # A FAILED forced run ahead of schedule is an operator probe, not a scheduled attempt.
+        consume_retry = not ahead
+        failures = (previous.consecutive_failures if same_target else 0) + (1 if consume_retry else 0)
         retry_minutes = result.metadata.get("same_day_retry_minutes")
         short_retry = type(retry_minutes) is int and 1 <= retry_minutes < 360
         # A Keeper's own next_action_at is only a floor (e.g. Retry-After). For FAILED,
@@ -127,7 +144,20 @@ class Orchestrator:
         requested_at = (finished_at + timedelta(minutes=retry_minutes)
                         if short_retry else result.next_action_at)
         metadata = {**result.metadata, "business_target": target.to_dict()}
-        if result.status is KeepStatus.FAILED:
+        if forced:
+            metadata["forced"] = True
+            metadata["forced_ahead_of_schedule"] = ahead
+            if ahead:
+                metadata["forced_scheduled_due"] = scheduled_due.astimezone(timezone.utc).isoformat()
+        if result.status is KeepStatus.FAILED and not consume_retry:
+            # Keep the planned slot (today's drawn window time or pending retry); a Keeper
+            # cooldown can only push it later. No retry is spent and nothing is exhausted.
+            next_action = max(scheduled_due.astimezone(timezone.utc),
+                              finished_at if requested_at is None else requested_at.astimezone(timezone.utc))
+            metadata["retry_attempt"] = failures
+            metadata["retry_limit"] = len(flame.schedule.retry_minutes)
+            metadata["retry_consumed"] = False
+        elif result.status is KeepStatus.FAILED:
             plan = failure_plan(flame.schedule, finished_at, failures, requested_at=requested_at)
             next_action = plan.next_at
             metadata["retry_attempt"] = failures
@@ -154,6 +184,7 @@ class Orchestrator:
             result,
             finished_at,
             target,
+            consume_retry=consume_retry,
         )
         record = RunRecord(
             run_id=str(uuid4()),
@@ -286,6 +317,8 @@ class Orchestrator:
         result: KeepResult,
         checked_at: datetime,
         target: BusinessTarget,
+        *,
+        consume_retry: bool = True,
     ) -> FlameState:
         if result.status is KeepStatus.SUCCESS:
             last_success = result.receipt.observed_at
@@ -295,7 +328,8 @@ class Orchestrator:
             last_reminder = None
         elif result.status is KeepStatus.FAILED:
             last_success = None if previous is None else previous.last_success_at
-            failures = (previous.consecutive_failures if previous is not None and previous.last_checked_target == target else 0) + 1
+            failures = ((previous.consecutive_failures if previous is not None and previous.last_checked_target == target else 0)
+                        + (1 if consume_retry else 0))
             pending_since = None
             action = None
             last_reminder = None

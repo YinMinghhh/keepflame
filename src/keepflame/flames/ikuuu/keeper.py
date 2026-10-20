@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
@@ -119,14 +120,15 @@ class IkuuuKeeper:
 
     # -- results --------------------------------------------------------------------
     @staticmethod
-    def _login_action(flame_id: str, base: str | None, reason: str) -> HumanAction:
+    def _login_action(flame_id: str, base: str | None, reason: str, config_path: str | None = None) -> HumanAction:
         login_url = f"{base}{LOGIN_PATH}" if base else None
         base_arg = f" --base {base}" if base else " --base https://<当前域名>"
+        config_arg = f" --config {shlex.quote(config_path)}" if config_path else ""
         return HumanAction(
             kind=ACTION_KIND,
             summary=_SUMMARIES.get(reason, "ikuuu 需要重新登录"),
             instructions=(f"在浏览器打开登录页完成登录（含验证码），复制 Cookie 后在 KeepFlame 主机执行："
-                          f"pbpaste | keepflame ikuuu import-cookie --flame {flame_id}{base_arg}"),
+                          f"pbpaste | keepflame ikuuu import-cookie{config_arg} --flame {shlex.quote(flame_id)}{base_arg}"),
             url=login_url,
         )
 
@@ -134,7 +136,7 @@ class IkuuuKeeper:
         return KeepResult(
             KeepStatus.WAITING_HUMAN, f"ikuuu check-in needs a fresh login: {reason}",
             metadata={**metadata, "reason": reason, "base_url": base},
-            human_action=self._login_action(context.flame_id, base, reason),
+            human_action=self._login_action(context.flame_id, base, reason, context.config_path),
         )
 
     @staticmethod

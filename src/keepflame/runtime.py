@@ -141,14 +141,26 @@ class Runtime:
             reason = 'flame_disabled_or_changed'
         elif self.blocked(flame) or self.storage.is_paused(flame.keeper, flame.account_id, flame.id):
             reason = 'automation_paused'
-        elif self.service.planner.due(self.config, flame, self.storage.get_state(flame.id, flame.account_id), now) > now:
-            reason = 'not_due'
+        forced = bool(request.get('forced'))
+        scheduled_due = None
+        if reason is None:
+            # Computing due also persists today's window draw exactly as the scheduler would.
+            due = self.service.planner.due(self.config, flame, self.storage.get_state(flame.id, flame.account_id), now)
+            if due > now:
+                if forced:
+                    # --force bypasses only this due-time gate; every check above still applies.
+                    scheduled_due = due
+                else:
+                    reason = 'not_due'
         outcome = None
         if reason is None:
             self.notifier.emit('daemon_run_started', request_id=request['id'], owner_id=self.dispatch_owner,
-                               flame_id=flame.id, business_target=target.to_dict())
+                               flame_id=flame.id, business_target=target.to_dict(), forced=forced,
+                               forced_ahead_of_schedule=scheduled_due is not None,
+                               scheduled_due=None if scheduled_due is None else scheduled_due.isoformat())
             try:
-                outcome = self.orchestrator.run_flame(flame, notify=False, business_target=target)
+                outcome = self.orchestrator.run_flame(flame, notify=False, business_target=target,
+                                                      forced=forced, scheduled_due=scheduled_due)
             except AutomationPaused:
                 # A pause may have arrived after the previous local check.
                 reason = 'automation_paused'
@@ -157,7 +169,7 @@ class Runtime:
         self.storage.finish_run_request(request['id'], self.dispatch_owner,
                                         self.orchestrator.clock.now(), reason=reason, outcome=outcome)
         self.notifier.emit('daemon_run_finished', request_id=request['id'],
-                           state='rejected' if reason else 'completed', reason=reason,
+                           state='rejected' if reason else 'completed', reason=reason, forced=forced,
                            run_id=None if outcome is None else outcome.record.run_id,
                            result_status=None if outcome is None else outcome.record.result.status.value,
                            business_target=None if target is None else target.to_dict(),
@@ -227,6 +239,7 @@ def build_runtime(
         secrets=secrets,
         notifier=delivery_notifier if delivery_notifier is not None else lifecycle,
         clock=clock,
+        config_path=str(config.source_path.resolve()),
     )
     service = SchedulerService(
         config=config,
