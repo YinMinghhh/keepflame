@@ -31,6 +31,8 @@ cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.co
 # verify_after_action = true      # re-read the task list and require is_completed
 # timeout_seconds = 15
 # request_pause_seconds = 1.0
+# transport_retries = 2           # same-run retries for no-response errors (e.g. SSLEOFError)
+# transport_backoff_seconds = 2.0 # wait 2 s, then 4 s; POSTs re-read remote state before resending
 
 [[flames]]
 id = "tushare-view"

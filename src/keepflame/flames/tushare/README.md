@@ -26,9 +26,22 @@
    - 已完成 / 重复（任务列表 `is_completed`，或返回文案含“已达上限/已完成/已签到”等）→ SUCCESS，不重复调用。
    - 接口返回 `code == 40201`（未找到登录信息，HTTP 200）、401/403、跳转到登录页 → `WAITING_HUMAN`（`session_expired`），提醒里写明登录链接 `https://tushare.pro/weborder/#/login` 和导入命令。Slack 只给不带 `#`/`?` 的链接加 `Action-URL`，所以可点链接是 `https://tushare.pro/weborder/`（未登录时网页会自己跳到登录页）。
    - Cookie 文件缺失或权限不对 → `WAITING_HUMAN`（`cookie_unreadable`）；格式不对 → `cookie_invalid`。
-   - 其他非 200、非 JSON、`code != 0`、`success=false`、动作后任务仍未完成、网络错误 → FAILED，按 `retry_minutes` 有限重试，用尽后当天发一次 `retries_exhausted`。因为每次都先查已完成状态，重试不会重复领取。
+   - 网络层错误（没有拿到任何 HTTP 响应：连接失败、TLS 断开如 `SSLEOFError`、超时、连接被重置、响应读一半断开）先在**本次运行内**重试，见下文“网络层重试”。
+   - 其他非 200、非 JSON、`code != 0`、`success=false`、动作后任务仍未完成、网络层重试用尽 → FAILED，按 `retry_minutes` 有限重试，用尽后当天发一次 `retries_exhausted`。因为每次都先查已完成状态，重试不会重复领取。
    - 配置无效 → FAILED 并暂停自动化。
 6. `WAITING_HUMAN` 立即发 `human_action_required`，之后每个新业务日复查并再次提醒；同一天 Cookie 未变化时不联网。三个 Flame 各自判断，Cookie 失效时会各发一次提醒；重新导入一次 Cookie 三个都恢复。
+
+## 网络层重试
+
+Mac mini 上约三分之一的 tushare.pro 请求会在约 5 秒后以 `SSLEOFError`（UNEXPECTED_EOF_WHILE_READING）失败，走代理和直连都一样。所以同一次运行内对网络层错误做有限重试：
+
+- 只重试**没有拿到 HTTP 响应**的错误。HTTP 4xx/5xx、非 JSON、`code != 0`、`code == 40201` 都不在本次运行内重试。
+- GET（`tasks`、`guess/current`、`doc_id=9` 页面）直接重试，最多 `transport_retries` 次（默认 2），每次间隔 `transport_backoff_seconds × 第几次`（默认 2 秒、4 秒）。
+- POST（`sign`、`view`、`guess/vote`）**从不盲目重发**：响应丢了不代表请求没到服务器。等待退避后先重新读远端状态：
+  - `sign` / `view`：重读任务列表，`is_completed=true` 就记 SUCCESS（`completed_after_transport_error`，本次领取）并停止；仍未完成才重发一次 POST。
+  - `guess`：重读 `guess/current`，已有投票就停止（是我们投的方向记 `voted_after_transport_error`，否则记 `already_voted`）；竞猜已关闭记 `not_open`；仍开放且未投才用**同一方向**重发（平票时不会重新抽签）。
+- 每次网络层错误写一行日志 `tushare_transport_error {...}`（步骤、方法、异常类型、第几次、上限），元数据记 `error_type`（例如 `SSLEOFError`）、`transport_step` 和 `<步骤>_transport_attempts`，不含 URL 参数、请求头或 Cookie。
+- 共享的 `UrllibHttpClient` 现在把所有“无响应”错误（含读响应时的 TLS/连接错误）都归为 `HttpTransportError`，并带 `error_type`。重试和 POST 安全判断留在 Keeper 里；ikuuu 目前只在失败元数据里记录 `error_type`，不在本次运行内重试（它的签到没有可先查的已完成接口）。
 
 ## 配置
 
@@ -43,6 +56,8 @@
 | `guess_tie` | 否 | `random` | 仅 `guess`：平票时 `random`（随机）/ `up` / `down`，总是投票 |
 | `timeout_seconds` | 否 | 15 | 3–60 |
 | `request_pause_seconds` | 否 | 1.0 | 0–10，请求之间的间隔 |
+| `transport_retries` | 否 | 2 | 0–5，本次运行内网络层错误的重试次数（POST 每次重发前先重读状态） |
+| `transport_backoff_seconds` | 否 | 2.0 | 0–30，第 n 次重试前等待 n 倍这个秒数 |
 
 ## 导出并导入 Cookie
 
@@ -69,7 +84,7 @@
 
 - 会话 Cookie 名称、有效期、是否 HttpOnly，有无 CSRF Cookie/请求头（目前未发送任何 CSRF 头）。
 - `tasks` 登录后的返回格式（目前按 `data.datas[].task_code / is_completed` 解析），`VIEW_NEW_DATA` 的 `limit_times=0` 含义。
-- 签到成功与重复签到的返回原文（重复文案目前按“已达上限/已完成/已签到”等匹配）。
+- 签到成功与重复签到的返回原文。**已确认（真实运行）**：签到和浏览上新成功都返回「任务完成，积分已发放」。重复时的原文仍待确认（目前按“已达上限/已完成/已签到”等匹配）。
 - 浏览上新是否只调 `view` 就算完成，还是要先访问 `doc_id=9` 页面（目前两者都做）。
 - 投票请求与返回、积分记录文案。
 - 周末能否签到和浏览；`guess/current` 周末显示哪一期。
