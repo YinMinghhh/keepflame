@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
 
-from keepflame.capabilities.http import HttpClient, HttpRequest, HttpResponse, HttpTransportError
+from keepflame.capabilities.http import HttpClient, HttpRequest, HttpResponse, HttpTransportError, transport_error_type
 from keepflame.capabilities.secrets import SecretReadError
 from keepflame.core.models import HumanAction, JsonValue, KeepResult, KeepStatus
 from keepflame.core.protocols import KeeperContext
@@ -213,8 +213,9 @@ class IkuuuKeeper:
         }, body=b"")
         try:
             response = http.send(request, timeout_seconds=settings.timeout)
-        except HttpTransportError:
-            return self._failed("checkin_transport_error", metadata)
+        except HttpTransportError as exc:
+            # The check-in POST is not retried in-run (no remote pre-check); only the cause is recorded.
+            return self._failed("checkin_transport_error", {**metadata, "error_type": transport_error_type(exc)})
         metadata = {**metadata, "remote_status": response.status}
         if response.status in {301, 302, 303, 307, 308}:
             location = response.header("location") or ""

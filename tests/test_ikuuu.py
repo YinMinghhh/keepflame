@@ -471,3 +471,16 @@ def test_rfc6265_quoted_cookie_value_is_accepted_and_kept_verbatim(tmp_path):
     for bad in ('uid="abc', 'uid=abc"', 'uid="a"b"', 'uid=a"b', 'uid="a,b"', 'uid="'):
         with pytest.raises(CookieError):
             parse_import(bad)
+
+
+def test_checkin_transport_error_records_the_cause_type(tmp_path):
+    store_cookie(tmp_path)
+    routes = nav_routes()
+
+    def eof(request):
+        raise HttpTransportError(error_type="SSLEOFError")
+
+    routes[("POST", "https://ikuuu.pw/user/checkin")] = eof
+    outcome, _, _ = run(tmp_path, FakeHttp(routes))
+    result = outcome.record.result
+    assert result.metadata["reason"] == "checkin_transport_error" and result.metadata["error_type"] == "SSLEOFError"
