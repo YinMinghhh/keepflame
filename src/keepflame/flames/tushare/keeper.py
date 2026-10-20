@@ -25,7 +25,9 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
-from keepflame.capabilities.http import HttpClient, HttpRequest, HttpResponse, HttpTransportError
+from keepflame.capabilities.http import (
+    HttpClient, HttpRequest, HttpResponse, HttpTransportError, transport_error_type,
+)
 from keepflame.capabilities.secrets import SecretReadError
 from keepflame.core.models import HumanAction, JsonValue, KeepResult, KeepStatus, Reward, RewardSource
 from keepflame.core.protocols import KeeperContext
@@ -54,8 +56,9 @@ VOTE_UP, VOTE_DOWN = 1, 2
 TIE_POLICIES = ("random", "up", "down")
 LOG = logging.getLogger(__name__)
 HUMAN_REASONS = {"session_expired", "cookie_unreadable", "cookie_invalid"}
-# TODO(T0): confirm the exact repeated sign/view wording once logged in. "已达上限"/"已完成"
-# come from the public shyz2006/tushare-checkin script; the others are tolerant guesses.
+# Confirmed in a real run: a successful sign and view both answer 「任务完成，积分已发放」.
+# TODO(T0): confirm the repeated sign/view wording. "已达上限"/"已完成" come from the public
+# shyz2006/tushare-checkin script; the others are tolerant guesses.
 _ALREADY = re.compile(r"已达上限|已完成|已经?签到|已签|已领取|已浏览|重复|already", re.I)
 _SUMMARIES = {
     "session_expired": "Tushare 登录会话已失效",
@@ -96,6 +99,12 @@ class _Settings:
         if isinstance(pause, bool) or not isinstance(pause, (int, float)) or not 0 <= pause <= 10:
             raise ValueError("request_pause_seconds")
         self.pause = float(pause)
+        # Same-run retries for transport failures only (no HTTP response at all).
+        self.transport_retries = _int(settings, "transport_retries", 2, 0, 5)
+        backoff = settings.get("transport_backoff_seconds", 2.0)
+        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) or not 0 <= backoff <= 30:
+            raise ValueError("transport_backoff_seconds")
+        self.transport_backoff = float(backoff)
 
 
 def _int(settings, key, default, low, high):
@@ -166,6 +175,14 @@ def _retry_after(response: HttpResponse, now: datetime) -> datetime | None:
         return None
 
 
+class _PostTransport(Exception):
+    """A POST got no response; it may or may not have reached the server."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+
+
 class _Stop(Exception):
     """Carries a finished KeepResult out of a nested request helper."""
 
@@ -232,10 +249,25 @@ class TushareKeeper:
             headers["Origin"] = ORIGIN
         if body is not None:
             headers["Content-Type"] = "application/json;charset=UTF-8"
-        try:
-            response = http.send(HttpRequest(method, url, headers=headers, body=body), timeout_seconds=settings.timeout)
-        except HttpTransportError:
-            raise _Stop(self._failed(task, f"{step}_transport_error", metadata)) from None
+        # GETs are read-only and retried here. POSTs are never resent blindly: the caller
+        # re-reads remote state first (_post_once_safely).
+        attempts = 1 + settings.transport_retries if method == "GET" else 1
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = http.send(HttpRequest(method, url, headers=headers, body=body),
+                                     timeout_seconds=settings.timeout)
+                break
+            except HttpTransportError as exc:
+                error_type = transport_error_type(exc)
+                self._note_transport(context, metadata, step, method, error_type, attempt,
+                                     1 + settings.transport_retries)
+                if method != "GET":
+                    raise _PostTransport(error_type) from None
+                if attempt >= attempts:
+                    raise _Stop(self._failed(task, f"{step}_transport_error", metadata)) from None
+                self._backoff(settings, attempt)
         metadata[f"{step}_http_status"] = response.status
         if response.status in {401, 403}:
             raise _Stop(self._human(context, task, "session_expired", metadata))
@@ -277,6 +309,44 @@ class TushareKeeper:
     def _pause(self, settings) -> None:
         if settings.pause:
             self.sleeper(settings.pause)
+
+    def _backoff(self, settings, attempt: int) -> None:
+        if settings.transport_backoff:
+            self.sleeper(settings.transport_backoff * attempt)
+
+    @staticmethod
+    def _note_transport(context, metadata, step, method, error_type, attempt, limit) -> None:
+        metadata["error_type"] = error_type
+        metadata["transport_step"] = step
+        metadata[f"{step}_transport_attempts"] = attempt
+        # Diagnostics only: exception class and counters, never URLs with cookies, headers or bodies.
+        LOG.warning("tushare_transport_error %s", json.dumps({
+            "flame_id": context.flame_id, "step": step, "method": method, "error_type": error_type,
+            "attempt": attempt, "max_attempts": limit,
+        }))
+
+    def _post_once_safely(self, context, http, settings, cookie, task, url, step, metadata, now, *,
+                          body=None, recheck):
+        """POST at most once per confirmed-not-done state.
+
+        After a transport failure the POST may have landed, so ``recheck()`` re-reads the
+        remote state first: it returns a finished KeepResult when the work is already done,
+        or ``None`` to allow one more POST. Returns ``(data, None)`` or ``(None, result)``.
+        """
+        attempts = 1 + settings.transport_retries
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._api(context, http, settings, cookie, task, "POST", url, step, metadata, now,
+                                 body=body), None
+            except _PostTransport:
+                metadata[f"{step}_transport_attempts"] = attempt
+                if attempt >= attempts:
+                    raise _Stop(self._failed(task, f"{step}_transport_error", metadata)) from None
+                self._backoff(settings, attempt)
+                done = recheck()
+                if done is not None:
+                    return None, done
+        raise AssertionError("unreachable")
 
     # -- run ------------------------------------------------------------------------
     def keep(self, context: KeeperContext) -> KeepResult:
@@ -353,8 +423,19 @@ class TushareKeeper:
                        page=True)
             self._pause(settings)
         step = "sign" if task == "sign" else "view"
-        data = self._api(context, http, settings, cookie, task, "POST", SIGN_URL if task == "sign" else VIEW_URL,
-                         step, metadata, now)
+
+        def recheck():
+            if self._task_completed(context, http, settings, cookie, metadata, now, "recheck") is True:
+                # Not done before this run's POST, done now: the lost-response POST landed.
+                return self._success(task, f"Tushare {_LABELS[task]} completed (response was lost in transit)",
+                                     {**metadata, state_key: "completed_after_transport_error"}, now, claimed=True)
+            return None
+
+        data, done = self._post_once_safely(context, http, settings, cookie, task,
+                                            SIGN_URL if task == "sign" else VIEW_URL, step, metadata, now,
+                                            recheck=recheck)
+        if done is not None:
+            return done
         message = _clean_message(data.get("message")) or metadata.get(f"{step}_message")
         success = data.get("success")
         metadata["remote_success"] = success if isinstance(success, bool) else None
@@ -414,8 +495,28 @@ class TushareKeeper:
             "tie": tied, "tie_policy": metadata["tie_policy"],
         }, ensure_ascii=False))
         self._pause(settings)
-        result = self._api(context, http, settings, cookie, "guess", "POST", GUESS_VOTE_URL, "vote", metadata, now,
-                           body={"vote": vote})
+
+        def recheck():
+            fresh = self._api(context, http, settings, cookie, "guess", "GET", GUESS_CURRENT_URL, "recheck",
+                              metadata, now)
+            fresh_guess = fresh.get("user_guess") if isinstance(fresh.get("user_guess"), dict) else {}
+            fresh_period = fresh.get("period") if isinstance(fresh.get("period"), dict) else {}
+            recorded_vote = fresh_guess.get("vote")
+            if recorded_vote not in (None, "", 0):
+                same = recorded_vote == vote
+                return self._success("guess", "Tushare guess vote landed (response was lost in transit)" if same
+                                     else "Tushare guess already voted for this period",
+                                     {**metadata, "guess_state": "voted_after_transport_error" if same else "already_voted",
+                                      "vote_confirmed": same}, now, claimed=same)
+            if fresh_period.get("status") != 1:
+                return self._success("guess", "Tushare guess closed before the vote could be confirmed",
+                                     {**metadata, "guess_state": "not_open"}, now, claimed=False)
+            return None  # still open and not voted: resend the same side
+
+        result, done = self._post_once_safely(context, http, settings, cookie, "guess", GUESS_VOTE_URL, "vote",
+                                              metadata, now, body={"vote": vote}, recheck=recheck)
+        if done is not None:
+            return done
         after = result.get("user_guess")
         recorded = after.get("vote") if isinstance(after, dict) else None
         metadata["vote_confirmed"] = recorded == vote if recorded is not None else None
