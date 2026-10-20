@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from keepflame.capabilities.http import HttpClient, HttpRequest, HttpTransportError
+from keepflame.capabilities.http import HttpClient, HttpRequest, HttpTransportError, transport_error_type
 from keepflame.flames.ikuuu.jsdecode import DecodeError, decoded_strings
 
 DEFAULT_NAV_SEEDS = ("https://ikuuu.bar/",)
@@ -62,6 +62,15 @@ class Discovery:
     probed: tuple[str, ...]
     seeds_reached: int
     methods: tuple[str, ...] = field(default=())
+    # Network diagnostics: how many requests got any HTTP response vs. none at all.
+    responses: int = 0
+    transport_errors: int = 0
+    error_type: str | None = None
+
+    @property
+    def network_only(self) -> bool:
+        """Nothing answered at all: every request died before an HTTP response."""
+        return self.base_url is None and self.transport_errors > 0 and self.responses == 0
 
 
 def normalize_base(value: str, host_pattern: str = DEFAULT_HOST_PATTERN) -> str | None:
@@ -141,15 +150,30 @@ class DomainFinder:
         self.sleeper = sleeper
         self.extra_sources = tuple(extra_sources)
         self._requests = 0
+        self._responses = 0
+        self._transport_errors = 0
+        self._error_type: str | None = None
 
     def _get(self, url: str):
         if self._requests:
             self.sleeper(self.pause_seconds)  # browser-like pacing between requests
         self._requests += 1
-        return self.http.send(HttpRequest("GET", url, headers={
-            "User-Agent": BROWSER_UA, "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }), timeout_seconds=self.timeout_seconds)
+        try:
+            response = self.http.send(HttpRequest("GET", url, headers={
+                "User-Agent": BROWSER_UA, "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }), timeout_seconds=self.timeout_seconds)
+        except HttpTransportError as exc:
+            self._transport_errors += 1
+            self._error_type = transport_error_type(exc)
+            raise
+        self._responses += 1
+        return response
+
+    def _found(self, base, found, probed, reached, methods) -> Discovery:
+        return Discovery(base, tuple(found), tuple(probed), reached, tuple(methods),
+                         responses=self._responses, transport_errors=self._transport_errors,
+                         error_type=self._error_type)
 
     def probe(self, base_url: str) -> bool:
         """GET {base}/auth/login and require the real login form on that same host."""
@@ -205,7 +229,7 @@ class DomainFinder:
             if base and base not in probed and len(probed) < self.max_probes:
                 probed.append(base)
                 if self.probe(base):
-                    return Discovery(base, (), tuple(probed), 0, ("known",))
+                    return self._found(base, (), probed, 0, ("known",))
         found, reached, methods = self.candidates()
         for base in found:
             if base in probed:
@@ -214,5 +238,5 @@ class DomainFinder:
                 break
             probed.append(base)
             if self.probe(base):
-                return Discovery(base, tuple(found), tuple(probed), reached, tuple(methods))
-        return Discovery(None, tuple(found), tuple(probed), reached, tuple(methods))
+                return self._found(base, found, probed, reached, methods)
+        return self._found(None, found, probed, reached, methods)

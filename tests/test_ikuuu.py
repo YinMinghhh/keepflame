@@ -328,10 +328,39 @@ def test_discovery_failure_uses_bounded_retries_then_alerts_the_same_day(tmp_pat
     storage, notifier = MemoryStorage(), FakeNotifier()
     for minutes in (0, 30, 90, 210):
         now = NOW.replace(minute=0) + timedelta(minutes=30 + minutes)
-        outcome, storage, notifier = run(tmp_path, FakeHttp({}), storage=storage, notifier=notifier, now=now)
+        # The nav seed answers (HTTP 503) but leads nowhere: a business failure, not a network one.
+        down = FakeHttp({("GET", "https://ikuuu.bar/"): ok("https://ikuuu.bar/", b"down", 503)})
+        outcome, storage, notifier = run(tmp_path, down, storage=storage, notifier=notifier, now=now)
         assert outcome.record.result.metadata["reason"] == "domain_discovery_failed"
         assert "automation_paused" not in outcome.record.result.metadata
+        assert "failure_class" not in outcome.record.result.metadata
     assert [e["event"] for e in notifier.events] == ["retries_exhausted"]
+
+
+def test_discovery_with_no_http_response_at_all_spends_the_network_budget(tmp_path):
+    store_cookie(tmp_path)
+    storage, notifier = MemoryStorage(), FakeNotifier()
+
+    class Unreachable(FakeHttp):
+        def send(self, request, *, timeout_seconds):
+            self.requests.append(request)
+            raise HttpTransportError(error_type="SSLEOFError")
+
+    unreachable = Unreachable()
+    outcome, storage, notifier = run(tmp_path, unreachable, storage=storage, notifier=notifier)
+    meta = outcome.record.result.metadata
+    assert meta["reason"] == "domain_discovery_failed" and meta["failure_class"] == "transport"
+    assert meta["error_type"] == "SSLEOFError" and meta["transport_failure_attempt"] == 1
+    assert outcome.state.consecutive_failures == 0 and notifier.events == []
+    assert not any(r.method == "POST" or "Cookie" in r.headers for r in unreachable.requests)
+
+
+def test_checkin_post_transport_error_stays_a_business_failure(tmp_path):
+    store_cookie(tmp_path)
+    outcome, _, _ = run(tmp_path, FakeHttp(nav_routes()))
+    meta = outcome.record.result.metadata
+    assert meta["reason"] == "checkin_transport_error" and "failure_class" not in meta
+    assert outcome.state.consecutive_failures == 1
 
 
 def test_rate_limit_and_transport_errors_are_retryable_failures(tmp_path):

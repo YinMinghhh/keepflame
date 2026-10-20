@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlsplit
 
 from keepflame.capabilities.http import HttpClient, HttpRequest, HttpResponse, HttpTransportError, transport_error_type
 from keepflame.capabilities.secrets import SecretReadError
-from keepflame.core.models import HumanAction, JsonValue, KeepResult, KeepStatus
+from keepflame.core.models import FAILURE_CLASS_TRANSPORT, HumanAction, JsonValue, KeepResult, KeepStatus
 from keepflame.core.protocols import KeeperContext
 from keepflame.flames.ikuuu.cookies import CookieError, SessionCookie, load_file
 from keepflame.flames.ikuuu.discovery import (
@@ -196,7 +196,11 @@ class IkuuuKeeper:
         base = found.base_url
         if base is None:
             # Nothing reachable: bounded same-day retries, then one retries_exhausted alert.
-            return self._failed("domain_discovery_failed", {**metadata, "base_url": previous_base})
+            failed = {**metadata, "base_url": previous_base}
+            if found.network_only:
+                # No request got any HTTP response and no cookie was sent: use the network budget.
+                failed.update({"failure_class": FAILURE_CLASS_TRANSPORT, "error_type": found.error_type})
+            return self._failed("domain_discovery_failed", failed)
         if cookie_problem is not None:
             return self._human(context, base, cookie_problem, metadata)
         if bound != base:
@@ -214,7 +218,8 @@ class IkuuuKeeper:
         try:
             response = http.send(request, timeout_seconds=settings.timeout)
         except HttpTransportError as exc:
-            # The check-in POST is not retried in-run (no remote pre-check); only the cause is recorded.
+            # The check-in POST is not retried in-run (no remote pre-check) and stays a business
+            # failure: the request may have reached the server. Only the cause is recorded.
             return self._failed("checkin_transport_error", {**metadata, "error_type": transport_error_type(exc)})
         metadata = {**metadata, "remote_status": response.status}
         if response.status in {301, 302, 303, 307, 308}:
