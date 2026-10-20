@@ -622,7 +622,7 @@ def test_get_transport_errors_are_retried_in_the_same_run_with_backoff(tmp_path,
     result = outcome.record.result
     assert result.status is KeepStatus.SUCCESS and result.metadata["sign_state"] == "already_completed"
     assert http.calls() == [("GET", TASKS_URL)] * 3
-    assert sleeps == [2.0, 4.0]  # transport_backoff_seconds * attempt; request_pause_seconds = 0
+    assert sleeps == [1.5, 1.5]  # constant transport_backoff_seconds; request_pause_seconds = 0
     assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["tasks_transport_attempts"] == 2
     lines = [json.loads(r.getMessage().split(" ", 1)[1]) for r in caplog.records
              if r.getMessage().startswith("tushare_transport_error ")]
@@ -637,6 +637,7 @@ def test_get_transport_errors_give_up_after_the_configured_retries(tmp_path):
     result = outcome.record.result
     assert result.status is KeepStatus.FAILED and result.metadata["reason"] == "tasks_transport_error"
     assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["tasks_transport_attempts"] == 4
+    assert result.metadata["failure_class"] == "transport" and outcome.state.consecutive_failures == 0
     assert len(http.requests) == 4
 
 
@@ -669,10 +670,13 @@ def test_post_transport_errors_stop_after_the_retry_budget(tmp_path):
     outcome = keeper_run(tmp_path, http)
     result = outcome.record.result
     assert result.status is KeepStatus.FAILED and result.metadata["reason"] == "sign_transport_error"
-    assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["sign_transport_attempts"] == 3
+    assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["sign_transport_attempts"] == 5
+    assert result.metadata["failure_class"] == "transport"
     posts = [c for c in http.calls() if c[0] == "POST"]
     gets = [c for c in http.calls() if c[0] == "GET"]
-    assert len(posts) == 3 and len(gets) == 3  # pre-check + one re-check before each resend
+    assert len(posts) == 5 and len(gets) == 5  # pre-check + one re-check before each resend
+    # Network-only: the business retry counter is untouched, the separate budget is spent.
+    assert outcome.state.consecutive_failures == 0 and result.metadata["transport_failure_attempt"] == 1
 
 
 def test_view_post_lost_response_recheck_counts_the_points(tmp_path):
@@ -717,10 +721,11 @@ def test_http_errors_and_api_rejections_are_not_retried_in_run(tmp_path, routes,
     outcome = keeper_run(tmp_path, http)
     assert outcome.record.result.metadata["reason"] == reason
     assert len(http.requests) == (1 if reason.startswith("tasks") else 2)
+    assert "failure_class" not in outcome.record.result.metadata and outcome.state.consecutive_failures == 1
 
 
 @pytest.mark.parametrize("overrides", [{"transport_retries": 6}, {"transport_retries": -1}, {"transport_retries": True},
-                                       {"transport_backoff_seconds": 31}, {"transport_backoff_seconds": "2"}])
+                                       {"transport_backoff_seconds": 11}, {"transport_backoff_seconds": "2"}])
 def test_transport_retry_settings_are_validated(tmp_path, overrides):
     outcome = keeper_run(tmp_path, FakeHttp({}), config=flame(tmp_path, "sign", **overrides))
     assert outcome.record.result.metadata["automation_paused"] is True

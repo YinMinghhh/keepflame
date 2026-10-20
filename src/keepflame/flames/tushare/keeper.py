@@ -29,7 +29,7 @@ from keepflame.capabilities.http import (
     HttpClient, HttpRequest, HttpResponse, HttpTransportError, transport_error_type,
 )
 from keepflame.capabilities.secrets import SecretReadError
-from keepflame.core.models import HumanAction, JsonValue, KeepResult, KeepStatus, Reward, RewardSource
+from keepflame.core.models import FAILURE_CLASS_TRANSPORT, HumanAction, JsonValue, KeepResult, KeepStatus, Reward, RewardSource
 from keepflame.core.protocols import KeeperContext
 from keepflame.flames.tushare.cookies import ORIGIN, CookieError, SessionCookie, load_file
 
@@ -99,10 +99,11 @@ class _Settings:
         if isinstance(pause, bool) or not isinstance(pause, (int, float)) or not 0 <= pause <= 10:
             raise ValueError("request_pause_seconds")
         self.pause = float(pause)
-        # Same-run retries for transport failures only (no HTTP response at all).
-        self.transport_retries = _int(settings, "transport_retries", 2, 0, 5)
-        backoff = settings.get("transport_backoff_seconds", 2.0)
-        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) or not 0 <= backoff <= 30:
+        # Same-run retries for transport failures only (no HTTP response at all). Every new
+        # TCP connect may land on another tushare.pro address, so a short constant pause works.
+        self.transport_retries = _int(settings, "transport_retries", 4, 0, 5)
+        backoff = settings.get("transport_backoff_seconds", 1.5)
+        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) or not 0 <= backoff <= 10:
             raise ValueError("transport_backoff_seconds")
         self.transport_backoff = float(backoff)
 
@@ -266,7 +267,7 @@ class TushareKeeper:
                 if method != "GET":
                     raise _PostTransport(error_type) from None
                 if attempt >= attempts:
-                    raise _Stop(self._failed(task, f"{step}_transport_error", metadata)) from None
+                    raise _Stop(self._transport_failed(task, step, metadata)) from None
                 self._backoff(settings, attempt)
         metadata[f"{step}_http_status"] = response.status
         if response.status in {401, 403}:
@@ -311,8 +312,13 @@ class TushareKeeper:
             self.sleeper(settings.pause)
 
     def _backoff(self, settings, attempt: int) -> None:
+        # Constant on purpose: the failure is per connection, not load, so waiting longer buys nothing.
         if settings.transport_backoff:
-            self.sleeper(settings.transport_backoff * attempt)
+            self.sleeper(settings.transport_backoff)
+
+    def _transport_failed(self, task, step, metadata) -> KeepResult:
+        # Safe to re-run later: every run re-reads the task list / guess/current before any POST.
+        return self._failed(task, f"{step}_transport_error", {**metadata, "failure_class": FAILURE_CLASS_TRANSPORT})
 
     @staticmethod
     def _note_transport(context, metadata, step, method, error_type, attempt, limit) -> None:
@@ -341,7 +347,7 @@ class TushareKeeper:
             except _PostTransport:
                 metadata[f"{step}_transport_attempts"] = attempt
                 if attempt >= attempts:
-                    raise _Stop(self._failed(task, f"{step}_transport_error", metadata)) from None
+                    raise _Stop(self._transport_failed(task, step, metadata)) from None
                 self._backoff(settings, attempt)
                 done = recheck()
                 if done is not None:
