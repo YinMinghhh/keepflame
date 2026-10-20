@@ -20,6 +20,7 @@ import json
 import logging
 import random
 import re
+import shlex
 import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
@@ -185,13 +186,15 @@ class TushareKeeper:
 
     # -- results --------------------------------------------------------------------
     @staticmethod
-    def _login_action(flame_id: str, reason: str) -> HumanAction:
+    def _login_action(flame_id: str, reason: str, config_path: str | None = None) -> HumanAction:
+        # The command comes first so a notification length limit never cuts it off.
+        config_arg = f" --config {shlex.quote(config_path)}" if config_path else ""
         return HumanAction(
             kind=ACTION_KIND,
             summary=_SUMMARIES.get(reason, "Tushare 需要重新登录"),
             instructions=(f"在浏览器打开 {LOGIN_URL} 完成登录（含验证码），复制 tushare.pro 的 Cookie 后在 KeepFlame 主机执行："
-                          f"pbpaste | keepflame tushare import-cookie --flame {flame_id}"
-                          "（三个 Tushare Flame 共用同一个 Cookie 文件，导入一次即可）"),
+                          f"pbpaste | keepflame tushare import-cookie{config_arg} --flame {shlex.quote(flame_id)}"
+                          "（三个 Flame 共用一个 Cookie，导入一次即可）"),
             url=ACTION_URL,
         )
 
@@ -199,7 +202,7 @@ class TushareKeeper:
         return KeepResult(
             KeepStatus.WAITING_HUMAN, f"Tushare {_LABELS[task]} needs a fresh login: {reason}",
             metadata={**metadata, "reason": reason},
-            human_action=self._login_action(context.flame_id, reason),
+            human_action=self._login_action(context.flame_id, reason, context.config_path),
         )
 
     @staticmethod

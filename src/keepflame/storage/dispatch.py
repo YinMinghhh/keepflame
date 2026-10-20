@@ -39,6 +39,9 @@ class DispatchStorageMixin:
         for name in ("target_day", "target_timezone"):
             if name not in existing:
                 connection.execute(f"ALTER TABLE run_requests ADD COLUMN {name} TEXT")
+        if "forced" not in existing:
+            # Operator-forced request (run-once --via-daemon --force): skips only the due-time gate.
+            connection.execute("ALTER TABLE run_requests ADD COLUMN forced INTEGER NOT NULL DEFAULT 0")
         connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_pending_run_request
             ON run_requests(keeper, account_id, flame_id)
             WHERE state IN ('requested','running')""")
@@ -129,7 +132,7 @@ class DispatchStorageMixin:
             if changed:
                 self._retire_requests(connection, now, 'owner_stopped')
 
-    def submit_run(self, identifier, config, flame, now):
+    def submit_run(self, identifier, config, flame, now, *, forced=False):
         try:
             if str(UUID(identifier)) != identifier:
                 raise ValueError
@@ -143,6 +146,8 @@ class DispatchStorageMixin:
             if previous is not None:
                 if tuple(previous[k] for k in ('flame_id','keeper','account_id','config_path','fingerprint')) != identity:
                     raise DispatchError('request ID already belongs to another target or configuration')
+                if bool(dict(previous).get('forced')) != bool(forced):
+                    raise DispatchError('request ID was submitted with a different --force setting')
                 return dict(previous)
             owner = connection.execute('SELECT * FROM daemon_owner WHERE singleton=1').fetchone()
             if (owner is None or not owner['active'] or not self.runner_active()
@@ -159,11 +164,20 @@ class DispatchStorageMixin:
                 AND state IN ('requested','running')""", (flame.keeper, flame.account_id, flame.id)).fetchone():
                 raise DispatchError('this Flame already has an unfinished request; reuse its request ID')
             target = BusinessTarget.at(now, flame.schedule.timezone)
-            connection.execute("""INSERT INTO run_requests
-                (id,owner_id,flame_id,keeper,account_id,config_path,fingerprint,state,created_at,expires_at,
-                 target_day,target_timezone) VALUES (?,?,?,?,?,?,?,'requested',?,?,?,?)""",
-                (identifier, owner['id'], *identity, stamp(now), stamp(now + timedelta(minutes=5)),
-                 target.day, target.timezone))
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(run_requests)')}
+            values = (identifier, owner['id'], *identity, stamp(now), stamp(now + timedelta(minutes=5)),
+                      target.day, target.timezone)
+            if 'forced' in columns:
+                connection.execute("""INSERT INTO run_requests
+                    (id,owner_id,flame_id,keeper,account_id,config_path,fingerprint,state,created_at,expires_at,
+                     target_day,target_timezone,forced) VALUES (?,?,?,?,?,?,?,'requested',?,?,?,?,?)""",
+                    (*values, 1 if forced else 0))
+            elif forced:
+                raise DispatchError('the running daemon predates --force; restart the service on this version')
+            else:
+                connection.execute("""INSERT INTO run_requests
+                    (id,owner_id,flame_id,keeper,account_id,config_path,fingerprint,state,created_at,expires_at,
+                     target_day,target_timezone) VALUES (?,?,?,?,?,?,?,'requested',?,?,?,?)""", values)
             return dict(connection.execute('SELECT * FROM run_requests WHERE id=?', (identifier,)).fetchone())
 
     def claim_run(self, owner_id, now):
