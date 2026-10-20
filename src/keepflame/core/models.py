@@ -40,6 +40,13 @@ class KeepStatus(StrEnum):
     WAITING_HUMAN = "WAITING_HUMAN"
 
 
+# A FAILED result whose metadata carries ``failure_class == FAILURE_CLASS_TRANSPORT`` got no
+# HTTP response at all and is safe to try again later (no credited action can have landed
+# unnoticed, because the next run re-reads remote state first). The core then spends the
+# separate per-day network budget instead of the business ``retry_minutes`` ladder.
+FAILURE_CLASS_TRANSPORT = "transport"
+
+
 class RewardSource(StrEnum):
     """Whether a reward was observed remotely or claimed by this run."""
 
