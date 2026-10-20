@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -77,7 +78,9 @@ def import_cookie(args, *, stdin=None, out=None) -> int:
     print(json.dumps({
         "event": "ikuuu_cookie_imported", "flame_id": flame.id, "base_url": base,
         "cookie_file": str(path), "cookie_names": list(cookie.names), "fingerprint": cookie.fingerprint,
-        "next": f"keepflame run-once --flame {flame.id} --execute  (or wait for the next scheduled recheck)",
+        "next": (f"keepflame run-once --config {shlex.quote(str(Path(args.config).resolve()))} --flame {flame.id}"
+                 " --via-daemon --force --execute  (service running; or run-once --execute when it is stopped,"
+                 " or wait for the next scheduled recheck)"),
     }, ensure_ascii=False), file=out)
     return 0
 

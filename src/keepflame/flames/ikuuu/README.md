@@ -47,7 +47,7 @@
    # 终端交互时不加管道，会以不回显方式提示粘贴
    ```
 
-   命令把文件原子写为 mode 600，拒绝仓库内路径和符号链接，只打印 Cookie 名称与指纹，不打印值。下一次计划运行即会签到。
+   命令把文件原子写为 mode 600，拒绝仓库内路径和符号链接，只打印 Cookie 名称与指纹，不打印值。下一次计划运行即会签到。服务在跑时可用 `keepflame run-once --config /path/to/keepflame.toml --flame ikuuu-primary --via-daemon --force --execute` 立即验收。告警里的导入命令已带上服务实际使用的 `--config` 路径。
 
 ## 更新导航种子
 

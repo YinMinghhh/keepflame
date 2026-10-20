@@ -96,6 +96,9 @@ class KeeperContext:
     clock: Clock | None = None
     business_target: BusinessTarget | None = None
     completion_receipt: Callable[[], CompletionReceipt] | None = None
+    # Absolute path of the configuration this process runs with, so human-action
+    # commands can name it (``--config``). Never a secret; ``None`` in tests/tools.
+    config_path: str | None = None
 
 
 class Keeper(Protocol):

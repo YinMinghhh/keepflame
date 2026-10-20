@@ -70,7 +70,32 @@ keepflame run-once --via-daemon --config /path/to/keepflame.toml \
 
 新任务使用新 UUID；重交同一任务必须保留原 UUID。加 `--execute` 才入队，退出码 0 仅表示请求已提交或找到原记录。`status --json` 的 `daemon_dispatch.requests` 保存最近 20 条状态：`completed` 表示已完成一次 Keeper 运行，业务结果见 `result_status`、`run_id` 及 Flame 状态；`FAILED`/`WAITING_HUMAN` 不能当作成功。相同 UUID 永不重新执行，不同 UUID 的同一未完成 Flame 也会拒绝。
 
-队列最多 16 个未完成请求；等待期限 5 分钟，每轮最多消费一个。请求绑定本次 daemon、配置路径/指纹、Keeper、账号及 Flame；入队还需核对当前 owner UUID 专属的进程锁。普通 run-once 持有通用 runner 锁不能证明 daemon 存活。执行时仍检查启用、配置重载、账号/任务暂停、登录窗口、每日窗口与退避。排队 Flame 暂由请求队列接手，防止同一调度轮再执行。daemon 的其他正常定时任务仍按配置运行。页面路由、403/429 处理和动作 pending 门禁不变，交接不是强制执行或重试入口。
+队列最多 16 个未完成请求；等待期限 5 分钟，每轮最多消费一个。请求绑定本次 daemon、配置路径/指纹、Keeper、账号及 Flame；入队还需核对当前 owner UUID 专属的进程锁。普通 run-once 持有通用 runner 锁不能证明 daemon 存活。执行时仍检查启用、配置重载、账号/任务暂停、登录窗口、每日窗口与退避。排队 Flame 暂由请求队列接手，防止同一调度轮再执行。daemon 的其他正常定时任务仍按配置运行。页面路由、403/429 处理和动作 pending 门禁不变，交接不是强制执行或重试入口；唯一例外是下面显式的 `--force`。
+
+### 服务运行时的人工验收：`--force`
+
+服务在跑时 `run-once --execute` 会因 runner 锁被拒，普通 `--via-daemon` 在未到点时返回 `not_due`。人工验收用：
+
+```bash
+keepflame run-once --config /path/to/keepflame.toml --flame tushare-sign --via-daemon --force --execute
+```
+
+- `--force` 只能和 `--via-daemon` 一起用；可省略 `--request-id`，命令会生成一个并在输出的 `check_with` 里给出查结果的完整命令（同一 UUID 重交不会重跑，只返回状态）。同一 UUID 不能改变 `--force` 设定。
+- 只跳过“未到点”（`not_due`）这一道门：runner 锁、daemon 存活与配置指纹、启用状态、配置 reload、账号/任务暂停、登录窗口、业务日检查都照旧；Keeper 自己的幂等检查（先查是否已完成）也照旧，所以不会重复领取。
+- 记录：`run_requests.forced=1`；`daemon_run_started` / `daemon_run_finished` 事件带 `forced`、`forced_ahead_of_schedule`、`scheduled_due`；运行记录和 Flame 状态元数据带 `forced`、`forced_ahead_of_schedule`，提前执行时还有 `forced_scheduled_due`。
+- 对排期的影响（提前于计划时间强制执行时）：
+  - 当天随机窗口的抽签不重抽、不消耗：判定前照常读取（必要时生成并持久化）当天抽签，强制运行不改它。
+  - SUCCESS：与正常成功一样，当天算完成，下一次是明天的窗口。
+  - FAILED：**不消耗当天的重试次数**（`consecutive_failures` 不加一，`retry_consumed=false`），也不触发 `retries_exhausted` 告警；`next_action_at` 保持原计划时间（当天抽签时间或待执行的重试时间），Keeper 给的冷却时间只能往后推。原定的排期运行照常进行并正常计数。
+  - WAITING_HUMAN：与正常一样立即提醒，并按 `recheck_minutes` 复查（Cookie 未变时不联网）。
+  - 以它为 `after_flame` 锚点的 Flame：仍保持在锚点最近一次运行之后至少 `min_gap_minutes`。
+- 已经到点时加 `--force` 等同普通运行（正常计数），只多记 `forced=true`。
+- daemon 没在跑时返回 `DispatchError`，并提示改用 `keepflame run-once --config <路径> --flame <ID> --execute`（独立运行，需先停服务）。
+- daemon 是旧版本（`run_requests` 没有 `forced` 列）时拒绝入队，提示重启服务。
+
+### 告警里的导入命令
+
+`human_action_required` 等人工告警里的 `import-cookie` 命令（tushare、ikuuu）带上 daemon 实际使用的配置绝对路径，并做了 shell 转义，例如 `pbpaste | keepflame tushare import-cookie --config '/Users/me/Services/keepflame/keepflame server.toml' --flame tushare-sign`，可直接复制执行。只含路径，不含任何密钥。
 
 daemon 正常退出取消未开始请求；已开始而未确认完成的请求标记 `interrupted` 并暂停对应 Flame。崩溃后的新 daemon 也只收拢这些状态，绝不自动重放旧请求或清除 action pending。通用执行锁和 owner 专属锁都保留到自有浏览器关闭后才释放。专属锁采用数据库旁的空白0600文件，正常关闭时删除；崩溃残留的空文件不证明活性，不扫描清理别的世代。状态中的 owner 是持久记录，`runner_lock_held`、`daemon_owner_lock_held` 是不同的锁快照；均不证明远端登录有效，也不能保证入队之后进程不会崩溃。不同客户端进程可以退出而不关闭 daemon 的原上下文；浏览器或 daemon 自身退出后没有会话恢复能力。上述合成验证不等于真实跨日、睡眠或重启后的认证验证。
 

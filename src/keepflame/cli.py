@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from keepflame.core.config import ConfigError, FlameConfig, default_config_path, load_config
 from keepflame.core.models import FlameState, KeepStatus, RunOutcome
@@ -39,6 +41,9 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument('--via-daemon', action='store_true',
                                  help='queue one bounded run in the existing daemon context; never start a browser')
             command.add_argument('--request-id', help='stable UUID for idempotent daemon submission')
+            command.add_argument('--force', action='store_true',
+                                 help='with --via-daemon: run now even if not due (manual acceptance); '
+                                      'lock, enabled/paused gates and Keeper idempotency still apply')
         if name == 'run':
             command.add_argument('--restore-browser-session', action='store_true',
                                  help='opt in to native session restore behind the startup network barrier')
@@ -352,6 +357,11 @@ def main(argv: list[str] | None = None) -> int:
             except TushareCookieError as exc:
                 return _error(str(exc), "CookieError")
         if args.command == 'run-once':
+            if args.force and not args.via_daemon:
+                raise ConfigError('--force requires --via-daemon (a standalone run-once --execute never checks due time)')
+            if args.via_daemon and args.force and args.flame and not args.request_id:
+                # Manual acceptance convenience: one fresh ID, printed so the result can be polled.
+                args.request_id = str(uuid4())
             if args.via_daemon and (not args.flame or not args.request_id):
                 raise ConfigError('--via-daemon requires --flame and a stable --request-id UUID')
             if args.request_id and not args.via_daemon:
@@ -402,12 +412,26 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError('--flame must name an enabled Flame')
             # Existing schema only: no migration, new runtime, profile access,
             # fallback to a standalone run, or ownership of the daemon browser.
-            storage = SQLiteStorage(config.storage.path, existing_only=True)
-            request = storage.submit_run(args.request_id, config, flame, datetime.now(timezone.utc))
+            config_arg = shlex.quote(str(config.source_path.resolve()))
+            try:
+                storage = SQLiteStorage(config.storage.path, existing_only=True)
+                request = storage.submit_run(args.request_id, config, flame, datetime.now(timezone.utc),
+                                             forced=args.force)
+            except (DispatchError, StorageError) as exc:
+                if isinstance(exc, StorageError) or str(exc).startswith('no executing daemon'):
+                    raise DispatchError(
+                        f'{exc}. No KeepFlame service is running for this configuration; for a one-off '
+                        f'manual run use: keepflame run-once --config {config_arg} --flame {shlex.quote(flame.id)} '
+                        '--execute') from None
+                raise
+            poll = (f'keepflame run-once --config {config_arg} --flame {shlex.quote(flame.id)} --via-daemon '
+                    f'--request-id {request["id"]}{" --force" if args.force else ""} --execute')
             print(json.dumps({'event': 'daemon_run_request', 'request_id': request['id'],
                               'state': request['state'], 'expires_at': request['expires_at'],
                               'run_id': request['run_id'], 'result_status': request['result_status'],
-                              'reason': request['reason'], 'execution_completed': request['state'] == 'completed'}))
+                              'reason': request['reason'], 'forced': bool(request.get('forced')),
+                              'execution_completed': request['state'] == 'completed',
+                              'check_with': poll}))
             return 0
         if args.command == "reload":
             config = load_config(args.config)
