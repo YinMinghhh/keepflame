@@ -14,6 +14,9 @@ first_check = "09:00"
 # first_window_start = "09:00"
 # first_window_end = "11:00"
 # retry_minutes = [30, 60, 120]
+# Network-only failures (no HTTP response) use a separate daily budget instead of retry_minutes:
+# transport_failure_cap = 6       # 0 disables it (network failures then use retry_minutes)
+# transport_retry_minutes = 10
 recheck_minutes = 60
 reminder_at = "20:00"
 stop_at = "23:00"

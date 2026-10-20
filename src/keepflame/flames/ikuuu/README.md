@@ -11,7 +11,9 @@
    - `ret == 1` → SUCCESS，元数据含 `traffic_gained`、`traffic_gained_mb`、`checked_in_at`。
    - 消息为“已经签到/已签到” → SUCCESS（`already_checked_in`）。
    - 302 到 `/auth/*`、401/403、返回登录页或“请登录”消息 → `WAITING_HUMAN`（`session_expired`）。
-   - 其他非 200、非 JSON、`ret != 1`、网络错误、找不到可用域名 → FAILED，按 `retry_minutes`（默认 30/60/120）有限重试，用尽后当天发一次 `retries_exhausted`。
+   - 找不到可用域名且**所有**请求都没拿到 HTTP 响应（纯网络故障，Cookie 尚未发出）→ FAILED，`failure_class = "transport"`、记录 `error_type`，走核心的独立网络预算（`transport_failure_cap`/`transport_retry_minutes`，不占 `retry_minutes`）。
+   - 签到 POST 的网络错误（`checkin_transport_error`，请求可能已到达服务器）仍是业务失败，只记录 `error_type`，不在本次运行内重发。
+   - 其他非 200、非 JSON、`ret != 1`、找不到可用域名 → FAILED，按 `retry_minutes`（默认 30/60/120）有限重试，用尽后当天发一次 `retries_exhausted`。
    - 配置无效 → FAILED 并暂停自动化。
 5. `WAITING_HUMAN` 立即发 `human_action_required`，之后每个新业务日复查并再次提醒；同一天 Cookie 未变化时不联网。Slack 消息附 `Action-URL: https://<域名>/auth/login` 与导入命令。
 

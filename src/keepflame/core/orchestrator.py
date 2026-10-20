@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from keepflame.core.config import FlameConfig
 from keepflame.core.eligibility import execution_paused
 from keepflame.core.models import (
+    FAILURE_CLASS_TRANSPORT,
     BusinessTarget,
     CompletionReceipt,
     FlameState,
@@ -29,7 +30,14 @@ from keepflame.core.protocols import (
     SecretResolver,
     Storage,
 )
-from keepflame.core.schedule import RETRIES_EXHAUSTED_KEY, failure_plan, next_after_result, reminder_due
+from keepflame.core.schedule import (
+    RETRIES_EXHAUSTED_KEY,
+    TRANSPORT_FAILURES_KEY,
+    failure_plan,
+    next_after_result,
+    reminder_due,
+    transport_failure_plan,
+)
 
 
 class SystemClock:
@@ -157,6 +165,23 @@ class Orchestrator:
             metadata["retry_attempt"] = failures
             metadata["retry_limit"] = len(flame.schedule.retry_minutes)
             metadata["retry_consumed"] = False
+        elif result.status is KeepStatus.FAILED and self._network_failure(flame, result):
+            # Network-only failure: spend the separate per-day network budget, not retry_minutes.
+            consume_retry = False
+            count = self._transport_failures(previous, target) + 1
+            plan = transport_failure_plan(flame.schedule, finished_at, count, requested_at=requested_at)
+            next_action = plan.next_at
+            metadata["retry_attempt"] = failures - 1
+            metadata["retry_limit"] = len(flame.schedule.retry_minutes)
+            metadata["transport_failure_attempt"] = count
+            metadata["transport_failure_cap"] = flame.schedule.transport_failure_cap
+            metadata[TRANSPORT_FAILURES_KEY] = {"day": target.day, "count": count}
+            if plan.exhausted:
+                metadata["retries_exhausted"] = True
+                metadata["exhausted_cause"] = "network"
+                result = replace(result, message=(
+                    f"{result.message} (cause: network; {count} network-failed runs today, "
+                    f"network retry budget used up)"))
         elif result.status is KeepStatus.FAILED:
             plan = failure_plan(flame.schedule, finished_at, failures, requested_at=requested_at)
             next_action = plan.next_at
@@ -297,6 +322,23 @@ class Orchestrator:
         queue(notification, metadata_updates={"no_success_alert_day": target.day})
 
     @staticmethod
+    def _network_failure(flame: FlameConfig, result: KeepResult) -> bool:
+        return (result.metadata.get("failure_class") == FAILURE_CLASS_TRANSPORT
+                and result.metadata.get("automation_paused") is not True
+                and flame.schedule.transport_failure_cap > 0)
+
+    @staticmethod
+    def _transport_failures(state: FlameState | None, target: BusinessTarget) -> int:
+        """Network-failed runs already spent on this business target (0 on a new day)."""
+        if state is None or state.last_checked_target != target:
+            return 0
+        value = state.metadata.get(TRANSPORT_FAILURES_KEY)
+        if not isinstance(value, dict) or value.get("day") != target.day:
+            return 0
+        count = value.get("count")
+        return count if type(count) is int and count >= 0 else 0
+
+    @staticmethod
     def _success_on_target(state: FlameState | None, target: BusinessTarget) -> bool:
         if state is None:
             return False
@@ -359,6 +401,11 @@ class Orchestrator:
             exhausted = previous.metadata.get(RETRIES_EXHAUSTED_KEY)
             if isinstance(exhausted, str) and exhausted == target.day:
                 metadata.setdefault(RETRIES_EXHAUSTED_KEY, exhausted)
+            # The network budget survives business failures and WAITING_HUMAN runs on the same day.
+            network = previous.metadata.get(TRANSPORT_FAILURES_KEY)
+            if (isinstance(network, dict) and network.get("day") == target.day
+                    and previous.last_checked_target == target):
+                metadata.setdefault(TRANSPORT_FAILURES_KEY, network)
         if result.status is KeepStatus.FAILED and metadata.get("retries_exhausted") is True:
             metadata[RETRIES_EXHAUSTED_KEY] = target.day
         return FlameState(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import socket
+import http.client
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
@@ -12,7 +12,26 @@ MAX_RESPONSE_BYTES = 1_048_576
 
 
 class HttpTransportError(RuntimeError):
-    pass
+    """No HTTP response was received (connect, TLS, timeout, reset, truncated read).
+
+    ``error_type`` names the underlying exception class (e.g. ``SSLEOFError``) for
+    diagnostics; it never carries URLs, headers or bodies.
+    """
+
+    def __init__(self, message: str = "HTTP request failed before a response was received", *,
+                 error_type: str | None = None) -> None:
+        super().__init__(message)
+        self.error_type = error_type or "HttpTransportError"
+
+
+def transport_error_type(exc: BaseException) -> str:
+    """Innermost useful exception class name: urllib wraps TLS/socket errors in URLError."""
+    if isinstance(exc, HttpTransportError):
+        return exc.error_type
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, URLError) and isinstance(reason, BaseException):
+        return type(reason).__name__
+    return type(exc).__name__
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +96,9 @@ class UrllibHttpClient:
                 headers={key.casefold(): value for key, value in exc.headers.items()},
                 body=_read_limited(exc),
             )
-        except (TimeoutError, socket.timeout, URLError) as exc:
-            raise HttpTransportError("HTTP request failed before a response was received") from exc
+        # HTTPError (a URLError) is handled above. Everything else here means no usable
+        # response: DNS/connect/TLS failures (incl. SSLEOFError), timeouts, resets, and
+        # truncated responses raised while reading the body.
+        except (URLError, OSError, http.client.HTTPException) as exc:
+            raise HttpTransportError(error_type=transport_error_type(exc)) from exc
 

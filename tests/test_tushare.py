@@ -159,10 +159,10 @@ def test_cookie_file_is_written_atomically_private_and_round_trips(tmp_path):
 def test_sign_success_claims_one_point_and_sends_the_cookie_only_to_tushare(tmp_path):
     store_cookie(tmp_path)
     http = FakeHttp({("GET", TASKS_URL): [tasks(sign=False), tasks(sign=True)],
-                     ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "签到成功"}})})
+                     ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "任务完成，积分已发放"}})})
     outcome, _, notifier = run(tmp_path, http)
     result = outcome.record.result
-    assert result.status is KeepStatus.SUCCESS and result.message == "签到成功"
+    assert result.status is KeepStatus.SUCCESS and result.message == "任务完成，积分已发放"
     assert result.reward.to_dict() == {"amount": "1", "unit": "积分", "source": "claimed"}
     assert result.metadata["sign_state"] == "completed_now" and result.metadata["remote_completed"] is True
     assert http.calls() == [("GET", TASKS_URL), ("POST", SIGN_URL), ("GET", TASKS_URL)]
@@ -211,7 +211,7 @@ def test_unrecognized_sign_outcomes_fail_for_bounded_retry(tmp_path, routes, rea
 def test_sign_that_is_not_credited_in_the_task_list_fails(tmp_path):
     store_cookie(tmp_path)
     http = FakeHttp({("GET", TASKS_URL): tasks(sign=False),
-                     ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "签到成功"}})})
+                     ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "任务完成，积分已发放"}})})
     outcome, _, _ = run(tmp_path, http)
     assert outcome.record.result.status is KeepStatus.FAILED
     assert outcome.record.result.metadata["reason"] == "sign_not_credited"
@@ -267,7 +267,7 @@ def test_unchanged_cookie_while_waiting_makes_no_requests_until_reimport(tmp_pat
     assert second.record.result.human_action == first.record.result.human_action
     store_cookie(tmp_path, header="uid=424242; session=SYNTHETIC-FRESH")
     fresh = FakeHttp({("GET", TASKS_URL): [tasks(sign=False), tasks(sign=True)],
-                      ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "签到成功"}})})
+                      ("POST", SIGN_URL): respond({"code": 0, "data": {"success": True, "message": "任务完成，积分已发放"}})})
     third, _, notifier = run(tmp_path, fresh, storage=storage, notifier=notifier, now=later + timedelta(hours=1))
     assert third.record.result.status is KeepStatus.SUCCESS
     assert "flame_recovered" in [e["event"] for e in notifier.events]
@@ -590,3 +590,142 @@ def test_unbalanced_or_embedded_quotes_are_still_rejected(bad):
         parse_import(bad)
     with pytest.raises(CookieError):
         parse_import(json.dumps([{"name": "uid", "value": bad.split("=", 1)[1], "domain": "tushare.pro"}]))
+
+
+# --- transport retries (SSLEOFError on the Mac mini) ----------------------------------
+
+def eof(request):
+    raise HttpTransportError(error_type="SSLEOFError")
+
+
+def flaky(*handlers):
+    """Consume handlers in order; the last one repeats."""
+    queue = list(handlers)
+    return lambda request: (queue.pop(0) if len(queue) > 1 else queue[0])(request)
+
+
+def keeper_run(tmp_path, http, *, task="sign", config=None, sleeps=None, choose=None):
+    sleeps = [] if sleeps is None else sleeps
+    runner = Orchestrator(storage=MemoryStorage(),
+                          registry=StaticRegistry(TushareKeeper(sleeper=sleeps.append, choose=choose)),
+                          capabilities=CapabilityRegistry({"http": http}), secrets=FileSecretResolver(),
+                          notifier=FakeNotifier(), clock=FixedClock(NOW))
+    return runner.run_flame(config or flame(tmp_path, task), now=NOW)
+
+
+def test_get_transport_errors_are_retried_in_the_same_run_with_backoff(tmp_path, caplog):
+    store_cookie(tmp_path)
+    sleeps = []
+    http = FakeHttp({("GET", TASKS_URL): flaky(eof, eof, tasks(sign=True))})
+    with caplog.at_level(logging.WARNING, logger="keepflame.flames.tushare.keeper"):
+        outcome = keeper_run(tmp_path, http, sleeps=sleeps)
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.metadata["sign_state"] == "already_completed"
+    assert http.calls() == [("GET", TASKS_URL)] * 3
+    assert sleeps == [1.5, 1.5]  # constant transport_backoff_seconds; request_pause_seconds = 0
+    assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["tasks_transport_attempts"] == 2
+    lines = [json.loads(r.getMessage().split(" ", 1)[1]) for r in caplog.records
+             if r.getMessage().startswith("tushare_transport_error ")]
+    assert [(l["step"], l["attempt"], l["error_type"]) for l in lines] == [("tasks", 1, "SSLEOFError"), ("tasks", 2, "SSLEOFError")]
+    assert "SYNTHETIC" not in caplog.text
+
+
+def test_get_transport_errors_give_up_after_the_configured_retries(tmp_path):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", TASKS_URL): eof})
+    outcome = keeper_run(tmp_path, http, config=flame(tmp_path, "sign", transport_retries=3, transport_backoff_seconds=0))
+    result = outcome.record.result
+    assert result.status is KeepStatus.FAILED and result.metadata["reason"] == "tasks_transport_error"
+    assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["tasks_transport_attempts"] == 4
+    assert result.metadata["failure_class"] == "transport" and outcome.state.consecutive_failures == 0
+    assert len(http.requests) == 4
+
+
+def test_sign_post_lost_response_rechecks_and_does_not_resend_when_it_landed(tmp_path):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", TASKS_URL): [tasks(sign=False), tasks(sign=True)], ("POST", SIGN_URL): eof})
+    outcome = keeper_run(tmp_path, http)
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.metadata["sign_state"] == "completed_after_transport_error"
+    assert http.calls() == [("GET", TASKS_URL), ("POST", SIGN_URL), ("GET", TASKS_URL)]  # one POST only
+    assert result.reward.amount == "1" and result.metadata["error_type"] == "SSLEOFError"
+
+
+def test_sign_post_is_resent_only_after_a_recheck_shows_not_done(tmp_path):
+    store_cookie(tmp_path)
+    ok_sign = respond({"code": 0, "data": {"success": True, "message": "任务完成，积分已发放"}})
+    http = FakeHttp({("GET", TASKS_URL): [tasks(sign=False), tasks(sign=False), tasks(sign=True)],
+                     ("POST", SIGN_URL): flaky(eof, ok_sign)})
+    outcome = keeper_run(tmp_path, http)
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.message == "任务完成，积分已发放"
+    assert http.calls() == [("GET", TASKS_URL), ("POST", SIGN_URL), ("GET", TASKS_URL), ("POST", SIGN_URL),
+                            ("GET", TASKS_URL)]
+    assert result.metadata["sign_state"] == "completed_now" and result.metadata["sign_transport_attempts"] == 1
+
+
+def test_post_transport_errors_stop_after_the_retry_budget(tmp_path):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", TASKS_URL): tasks(sign=False), ("POST", SIGN_URL): eof})
+    outcome = keeper_run(tmp_path, http)
+    result = outcome.record.result
+    assert result.status is KeepStatus.FAILED and result.metadata["reason"] == "sign_transport_error"
+    assert result.metadata["error_type"] == "SSLEOFError" and result.metadata["sign_transport_attempts"] == 5
+    assert result.metadata["failure_class"] == "transport"
+    posts = [c for c in http.calls() if c[0] == "POST"]
+    gets = [c for c in http.calls() if c[0] == "GET"]
+    assert len(posts) == 5 and len(gets) == 5  # pre-check + one re-check before each resend
+    # Network-only: the business retry counter is untouched, the separate budget is spent.
+    assert outcome.state.consecutive_failures == 0 and result.metadata["transport_failure_attempt"] == 1
+
+
+def test_view_post_lost_response_recheck_counts_the_points(tmp_path):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", TASKS_URL): [tasks(view=False), tasks(view=True)], ("GET", NEW_DATA_PAGE_URL): flaky(eof, PAGE),
+                     ("POST", VIEW_URL): eof})
+    outcome = keeper_run(tmp_path, http, task="view")
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.metadata["view_state"] == "completed_after_transport_error"
+    assert http.calls().count(("POST", VIEW_URL)) == 1 and http.calls().count(("GET", NEW_DATA_PAGE_URL)) == 2
+
+
+def test_guess_vote_lost_response_recheck_finds_the_vote_and_stops(tmp_path):
+    store_cookie(tmp_path)
+    http = FakeHttp({("GET", GUESS_CURRENT_URL): [current(), current(vote=1)], ("POST", GUESS_VOTE_URL): eof})
+    outcome = keeper_run(tmp_path, http, task="guess")
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.metadata["guess_state"] == "voted_after_transport_error"
+    assert result.metadata["vote_confirmed"] is True and http.calls().count(("POST", GUESS_VOTE_URL)) == 1
+
+
+def test_guess_vote_is_resent_with_the_same_side_when_still_open_and_unvoted(tmp_path):
+    store_cookie(tmp_path)
+    picks = []
+    http = FakeHttp({("GET", GUESS_CURRENT_URL): current(up=7, down=7),
+                     ("POST", GUESS_VOTE_URL): flaky(eof, respond({"code": 0, "data": {"user_guess": {"vote": 2}}}))})
+    outcome = keeper_run(tmp_path, http, task="guess", choose=lambda sides: picks.append(sides) or 2)
+    result = outcome.record.result
+    assert result.status is KeepStatus.SUCCESS and result.metadata["guess_state"] == "voted_now"
+    votes = [json.loads(r.body) for r in http.requests if r.method == "POST"]
+    assert votes == [{"vote": 2}, {"vote": 2}] and len(picks) == 1  # tie drawn once, never redrawn
+
+
+@pytest.mark.parametrize("routes, reason", [
+    ({("GET", TASKS_URL): tasks(), ("POST", SIGN_URL): respond(b"bad gateway", 502)}, "sign_http_error"),
+    ({("GET", TASKS_URL): tasks(), ("POST", SIGN_URL): respond({"code": 50001, "message": "busy"})}, "sign_rejected"),
+    ({("GET", TASKS_URL): respond(b"oops", 500)}, "tasks_http_error"),
+])
+def test_http_errors_and_api_rejections_are_not_retried_in_run(tmp_path, routes, reason):
+    store_cookie(tmp_path)
+    http = FakeHttp(routes)
+    outcome = keeper_run(tmp_path, http)
+    assert outcome.record.result.metadata["reason"] == reason
+    assert len(http.requests) == (1 if reason.startswith("tasks") else 2)
+    assert "failure_class" not in outcome.record.result.metadata and outcome.state.consecutive_failures == 1
+
+
+@pytest.mark.parametrize("overrides", [{"transport_retries": 6}, {"transport_retries": -1}, {"transport_retries": True},
+                                       {"transport_backoff_seconds": 11}, {"transport_backoff_seconds": "2"}])
+def test_transport_retry_settings_are_validated(tmp_path, overrides):
+    outcome = keeper_run(tmp_path, FakeHttp({}), config=flame(tmp_path, "sign", **overrides))
+    assert outcome.record.result.metadata["automation_paused"] is True

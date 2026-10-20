@@ -57,6 +57,10 @@ DEFAULT_FIRST_WINDOW = (time(9, 0), time(11, 0))
 DEFAULT_RETRY_MINUTES = (30, 60, 120)
 MAX_RETRIES = 10
 MAX_RETRY_MINUTES = 720
+DEFAULT_TRANSPORT_FAILURE_CAP = 6
+MAX_TRANSPORT_FAILURE_CAP = 24
+DEFAULT_TRANSPORT_RETRY_MINUTES = 10
+MAX_TRANSPORT_RETRY_MINUTES = 120
 MAX_GAP_MINUTES = 720
 
 
@@ -68,6 +72,9 @@ class ScheduleConfig:
     business day draws one uniform first-run time in ``[first_check, first_window_end)``;
     without it, ``first_check`` is a fixed daily start (the historic behavior).
     FAILED runs retry after ``retry_minutes`` in order, then stop for that day.
+    Network-only failures (``failure_class == "transport"``) use a separate budget instead:
+    up to ``transport_failure_cap`` re-runs per business day, ``transport_retry_minutes``
+    apart, never past ``stop_at``; ``transport_failure_cap = 0`` sends them to ``retry_minutes``.
     ``after_flame`` keeps this Flame at least ``min_gap_minutes`` after that Flame.
     """
 
@@ -80,6 +87,8 @@ class ScheduleConfig:
     retry_minutes: tuple[int, ...] = DEFAULT_RETRY_MINUTES
     after_flame: str | None = None
     min_gap_minutes: int = 5
+    transport_failure_cap: int = DEFAULT_TRANSPORT_FAILURE_CAP
+    transport_retry_minutes: int = DEFAULT_TRANSPORT_RETRY_MINUTES
 
     def __post_init__(self) -> None:
         try:
@@ -101,6 +110,14 @@ class ScheduleConfig:
         gap = self.min_gap_minutes
         if isinstance(gap, bool) or not isinstance(gap, int) or not 0 <= gap <= MAX_GAP_MINUTES:
             raise ConfigError(f"min_gap_minutes must be an integer from 0 to {MAX_GAP_MINUTES}")
+        cap = self.transport_failure_cap
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 0 <= cap <= MAX_TRANSPORT_FAILURE_CAP:
+            raise ConfigError(f"transport_failure_cap must be an integer from 0 to {MAX_TRANSPORT_FAILURE_CAP}")
+        spacing = self.transport_retry_minutes
+        if (isinstance(spacing, bool) or not isinstance(spacing, int)
+                or not 1 <= spacing <= MAX_TRANSPORT_RETRY_MINUTES):
+            raise ConfigError(
+                f"transport_retry_minutes must be an integer from 1 to {MAX_TRANSPORT_RETRY_MINUTES}")
         if self.after_flame is not None and (not isinstance(self.after_flame, str) or not self.after_flame.strip()):
             raise ConfigError("after_flame must be a non-empty flame id")
 
@@ -287,6 +304,7 @@ def _parse_slack(raw: dict[str, Any]) -> SlackConfig | None:
 _SCHEDULE_KEYS = {
     "timezone", "first_check", "first_window_start", "first_window_end", "recheck_minutes",
     "reminder_at", "stop_at", "retry_minutes", "after_flame", "min_gap_minutes",
+    "transport_failure_cap", "transport_retry_minutes",
 }
 
 
@@ -330,6 +348,8 @@ def _parse_schedule(schedule_raw: dict[str, Any], name: str) -> ScheduleConfig:
             retry_minutes=tuple(retries_raw),
             after_flame=after,
             min_gap_minutes=gap,
+            transport_failure_cap=schedule_raw.get("transport_failure_cap", DEFAULT_TRANSPORT_FAILURE_CAP),
+            transport_retry_minutes=schedule_raw.get("transport_retry_minutes", DEFAULT_TRANSPORT_RETRY_MINUTES),
         )
     except ConfigError as exc:
         raise ConfigError(f"{name}: {exc}") from exc

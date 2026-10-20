@@ -38,6 +38,8 @@ def _in_window(schedule: ScheduleConfig, candidate: datetime) -> datetime:
 
 
 RETRIES_EXHAUSTED_KEY = "retries_exhausted_day"
+# {"day": "YYYY-MM-DD", "count": n}: network-only FAILED runs on that business day.
+TRANSPORT_FAILURES_KEY = "transport_failures"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,35 @@ def failure_plan(
     if not 1 <= failures <= len(schedule.retry_minutes):
         return FailurePlan(stopped, True)
     candidate = now + timedelta(minutes=schedule.retry_minutes[failures - 1])
+    if floor is not None:
+        candidate = max(candidate, floor)
+    if candidate >= _at(day, schedule.stop_at, zone) or candidate.astimezone(zone).date() != day:
+        return FailurePlan(stopped, True)
+    return FailurePlan(_in_window(schedule, candidate), False)
+
+
+def transport_failure_plan(
+    schedule: ScheduleConfig,
+    now: datetime,
+    count: int,
+    *,
+    requested_at: datetime | None = None,
+) -> FailurePlan:
+    """Separate same-day budget for network-only failures.
+
+    The n-th network-failed run of the day (n <= transport_failure_cap) retries
+    ``transport_retry_minutes`` later; run cap+1, or a retry that would land at or after
+    ``stop_at``, stops for the day. Platform cooldowns stay lower bounds.
+    """
+    now = _as_utc(now)
+    zone = ZoneInfo(schedule.timezone)
+    day = now.astimezone(zone).date()
+    tomorrow = max(_at(day + timedelta(days=1), schedule.first_check, zone), now)
+    floor = None if requested_at is None else _as_utc(requested_at)
+    stopped = _in_window(schedule, tomorrow if floor is None else max(tomorrow, floor))
+    if not 1 <= count <= schedule.transport_failure_cap:
+        return FailurePlan(stopped, True)
+    candidate = now + timedelta(minutes=schedule.transport_retry_minutes)
     if floor is not None:
         candidate = max(candidate, floor)
     if candidate >= _at(day, schedule.stop_at, zone) or candidate.astimezone(zone).date() != day:

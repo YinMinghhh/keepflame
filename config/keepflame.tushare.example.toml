@@ -17,6 +17,9 @@ timezone = "Asia/Shanghai"
 first_window_start = "09:00"
 first_window_end = "10:30"
 retry_minutes = [30, 60, 120]
+# Network-only failures (no HTTP response) use a separate daily budget instead of retry_minutes:
+# transport_failure_cap = 6       # 0 disables it (network failures then use retry_minutes)
+# transport_retry_minutes = 10
 recheck_minutes = 60
 reminder_at = "20:00"
 stop_at = "23:00"
@@ -31,6 +34,8 @@ cookie_file = "/absolute/path/outside/repos/keepflame/secrets/tushare-primary.co
 # verify_after_action = true      # re-read the task list and require is_completed
 # timeout_seconds = 15
 # request_pause_seconds = 1.0
+# transport_retries = 4           # same-run retries for no-response errors (e.g. SSLEOFError)
+# transport_backoff_seconds = 1.5 # constant pause; POSTs re-read remote state before resending
 
 [[flames]]
 id = "tushare-view"
@@ -43,6 +48,9 @@ timezone = "Asia/Shanghai"
 first_window_start = "09:00"
 first_window_end = "10:30"
 retry_minutes = [30, 60, 120]
+# Network-only failures (no HTTP response) use a separate daily budget instead of retry_minutes:
+# transport_failure_cap = 6       # 0 disables it (network failures then use retry_minutes)
+# transport_retry_minutes = 10
 after_flame = "tushare-sign"
 min_gap_minutes = 5
 recheck_minutes = 60
