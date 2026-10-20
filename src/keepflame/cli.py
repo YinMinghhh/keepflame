@@ -59,6 +59,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--json", action="store_true", dest="as_json")
     from keepflame.flames.ikuuu.cli import add_parser as add_ikuuu_parser
     add_ikuuu_parser(subparsers, default_config_path())
+    from keepflame.flames.tushare.cli import add_parser as add_tushare_parser
+    add_tushare_parser(subparsers, default_config_path())
     return parser
 
 
@@ -342,6 +344,13 @@ def main(argv: list[str] | None = None) -> int:
                 return ikuuu_main(args)
             except CookieError as exc:
                 return _error(str(exc), type(exc).__name__)
+        if args.command == "tushare":
+            from keepflame.flames.tushare.cli import main as tushare_main
+            from keepflame.flames.tushare.cookies import CookieError as TushareCookieError
+            try:
+                return tushare_main(args)
+            except TushareCookieError as exc:
+                return _error(str(exc), "CookieError")
         if args.command == 'run-once':
             if args.via_daemon and (not args.flame or not args.request_id):
                 raise ConfigError('--via-daemon requires --flame and a stable --request-id UUID')
