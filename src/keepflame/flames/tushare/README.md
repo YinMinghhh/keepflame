@@ -27,21 +27,26 @@
    - 接口返回 `code == 40201`（未找到登录信息，HTTP 200）、401/403、跳转到登录页 → `WAITING_HUMAN`（`session_expired`），提醒里写明登录链接 `https://tushare.pro/weborder/#/login` 和导入命令。Slack 只给不带 `#`/`?` 的链接加 `Action-URL`，所以可点链接是 `https://tushare.pro/weborder/`（未登录时网页会自己跳到登录页）。
    - Cookie 文件缺失或权限不对 → `WAITING_HUMAN`（`cookie_unreadable`）；格式不对 → `cookie_invalid`。
    - 网络层错误（没有拿到任何 HTTP 响应：连接失败、TLS 断开如 `SSLEOFError`、超时、连接被重置、响应读一半断开）先在**本次运行内**重试，见下文“网络层重试”。
-   - 其他非 200、非 JSON、`code != 0`、`success=false`、动作后任务仍未完成、网络层重试用尽 → FAILED，按 `retry_minutes` 有限重试，用尽后当天发一次 `retries_exhausted`。因为每次都先查已完成状态，重试不会重复领取。
+   - 网络层重试用尽 → FAILED，走独立网络预算（不占 `retry_minutes`），见下文。
+   - 其他非 200、非 JSON、`code != 0`、`success=false`、动作后任务仍未完成 → FAILED，按 `retry_minutes` 有限重试，用尽后当天发一次 `retries_exhausted`。因为每次都先查已完成状态，重试不会重复领取。
    - 配置无效 → FAILED 并暂停自动化。
 6. `WAITING_HUMAN` 立即发 `human_action_required`，之后每个新业务日复查并再次提醒；同一天 Cookie 未变化时不联网。三个 Flame 各自判断，Cookie 失效时会各发一次提醒；重新导入一次 Cookie 三个都恢复。
 
 ## 网络层重试
 
-Mac mini 上约三分之一的 tushare.pro 请求会在约 5 秒后以 `SSLEOFError`（UNEXPECTED_EOF_WHILE_READING）失败，走代理和直连都一样。所以同一次运行内对网络层错误做有限重试：
+根因（运维值班已确认）：`tushare.pro` 解析到 `123.57.64.21` 和 `47.94.110.54`，从家里网络连 `123.57.64.21` 约一半 TCP 连接失败，另一个地址正常。Clash TUN（fake-ip、DIRECT）在 5 秒拨号超时后关闭连接，Python 看到的就是约 5.01 秒的 `SSLEOFError`（UNEXPECTED_EOF_WHILE_READING）。TLS 设置没有问题、不要改；因为 fake-ip，应用也无法自己挑 IP，所以靠重试：每次新连接都可能落到好的地址上。
 
-- 只重试**没有拿到 HTTP 响应**的错误。HTTP 4xx/5xx、非 JSON、`code != 0`、`code == 40201` 都不在本次运行内重试。
-- GET（`tasks`、`guess/current`、`doc_id=9` 页面）直接重试，最多 `transport_retries` 次（默认 2），每次间隔 `transport_backoff_seconds × 第几次`（默认 2 秒、4 秒）。
+同一次运行内对网络层错误做有限重试：
+
+- 只重试**没有拿到 HTTP 响应**的错误：`SSLEOFError` 等 TLS 错误、`ConnectionResetError`/`ConnectionRefusedError`、`URLError`、超时、`RemoteDisconnected`/`IncompleteRead`。HTTP 4xx/5xx、非 JSON、`code != 0`、`code == 40201` 都不在本次运行内重试。
+- GET（`tasks`、`guess/current`、`doc_id=9` 页面）直接重试，最多 `transport_retries` 次（默认 4，即最多 5 次尝试），每次间隔固定 `transport_backoff_seconds`（默认 1.5 秒；故障按连接随机发生，等更久没有帮助）。按约 50% 单次失败估算，5 次全失败约 3%。
 - POST（`sign`、`view`、`guess/vote`）**从不盲目重发**：响应丢了不代表请求没到服务器。等待退避后先重新读远端状态：
   - `sign` / `view`：重读任务列表，`is_completed=true` 就记 SUCCESS（`completed_after_transport_error`，本次领取）并停止；仍未完成才重发一次 POST。
   - `guess`：重读 `guess/current`，已有投票就停止（是我们投的方向记 `voted_after_transport_error`，否则记 `already_voted`）；竞猜已关闭记 `not_open`；仍开放且未投才用**同一方向**重发（平票时不会重新抽签）。
 - 每次网络层错误写一行日志 `tushare_transport_error {...}`（步骤、方法、异常类型、第几次、上限），元数据记 `error_type`（例如 `SSLEOFError`）、`transport_step` 和 `<步骤>_transport_attempts`，不含 URL 参数、请求头或 Cookie。
-- 共享的 `UrllibHttpClient` 现在把所有“无响应”错误（含读响应时的 TLS/连接错误）都归为 `HttpTransportError`，并带 `error_type`。重试和 POST 安全判断留在 Keeper 里；ikuuu 目前只在失败元数据里记录 `error_type`，不在本次运行内重试（它的签到没有可先查的已完成接口）。
+- 本次运行内重试用尽 → FAILED（`<步骤>_transport_error`，元数据 `failure_class = "transport"`）。这类失败**不消耗** `retry_minutes` 的业务重试次数，而走核心的独立网络预算：`transport_retry_minutes`（默认 10 分钟）后再跑，当天最多重排 `transport_failure_cap` 次（默认 6），不越过 `stop_at`，用尽后发一次注明 `cause: network` 的 `retries_exhausted`。这样做是安全的：每次运行都先读任务列表 / `guess/current`，POST 最后一次的结果未知也只会在下次被正确识别。
+- 最坏耗时：网络全断时一个 GET 5 次尝试约 5×(5 秒拨号超时 + 1.5 秒) ≈ 33 秒；`timeout_seconds` 是单次请求上限。
+- 共享的 `UrllibHttpClient` 现在把所有“无响应”错误（含读响应时的 TLS/连接错误）都归为 `HttpTransportError`，并带 `error_type`。重试和 POST 安全判断留在 Keeper 里；ikuuu 不在本次运行内重试；签到前的域名发现若所有请求都没拿到响应，也走网络预算，签到 POST 的网络错误仍算业务失败（见 ikuuu README）。
 
 ## 配置
 
@@ -56,8 +61,8 @@ Mac mini 上约三分之一的 tushare.pro 请求会在约 5 秒后以 `SSLEOFEr
 | `guess_tie` | 否 | `random` | 仅 `guess`：平票时 `random`（随机）/ `up` / `down`，总是投票 |
 | `timeout_seconds` | 否 | 15 | 3–60 |
 | `request_pause_seconds` | 否 | 1.0 | 0–10，请求之间的间隔 |
-| `transport_retries` | 否 | 2 | 0–5，本次运行内网络层错误的重试次数（POST 每次重发前先重读状态） |
-| `transport_backoff_seconds` | 否 | 2.0 | 0–30，第 n 次重试前等待 n 倍这个秒数 |
+| `transport_retries` | 否 | 4 | 0–5，本次运行内网络层错误的重试次数（POST 每次重发前先重读状态） |
+| `transport_backoff_seconds` | 否 | 1.5 | 0–10，每次重试前的固定等待秒数 |
 
 ## 导出并导入 Cookie
 
