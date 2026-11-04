@@ -267,6 +267,7 @@ def test_status_json_reports_exhausted_mail(tmp_path: Path, capsys) -> None:
     assert note["retry_at"] is None
     assert note["delivery_exhausted"] is True
     assert note["last_error_type"] == "MailDeliveryError"
+    assert note["last_error_category"] == "other"
     assert PASSWORD not in captured.out
 
 
