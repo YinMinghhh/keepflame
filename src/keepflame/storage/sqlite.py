@@ -428,6 +428,16 @@ class SQLiteStorage(ControlStorageMixin, DispatchStorageMixin, ArchiveStorageMix
         except (sqlite3.Error, ValueError) as exc:
             raise StorageError("failed to read or store daily first-run draw") from exc
 
+    def list_notifications(self) -> list[PendingNotification]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT payload_json FROM pending_notifications ORDER BY flame_id, account_id"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise StorageError("failed to list pending notifications") from exc
+        return [_notification(row["payload_json"]) for row in rows]
+
     def get_notification(self, flame_id: str, account_id: str) -> PendingNotification | None:
         try:
             with self._connect() as connection:

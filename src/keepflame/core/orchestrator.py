@@ -8,6 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from keepflame.core.config import FlameConfig
+from keepflame.core.delivery import delivery_error_record, retry_at_after_attempt
 from keepflame.core.eligibility import execution_paused
 from keepflame.core.models import (
     FAILURE_CLASS_TRANSPORT,
@@ -252,7 +253,11 @@ class Orchestrator:
         return RunOutcome(record=record, state=state, notification_event=event)
 
     def deliver_pending(self, flame: FlameConfig, *, now: datetime) -> datetime | None:
-        """Bounded delivery retries are independent of remote status checks."""
+        """Bounded delivery retries are independent of remote status checks.
+
+        Five failures clear ``retry_at``. This method does not reopen that budget;
+        ``keepflame notify retry --execute`` does, via ``rearm_exhausted``.
+        """
         pending = self.storage.get_notification(flame.id, flame.account_id)
         if pending is None or pending.retry_at is None:
             return None
@@ -266,13 +271,46 @@ class Orchestrator:
             )
         except Exception as exc:
             attempts = pending.attempts + 1
-            retry_at = None if attempts >= 5 else now + timedelta(seconds=60 * 2 ** (attempts - 1))
+            retry_at = retry_at_after_attempt(attempts, now)
+            error_type, category = delivery_error_record(exc)
             self.storage.update_notification(replace(
-                pending, attempts=attempts, retry_at=retry_at, last_error_type=type(exc).__name__,
+                pending, attempts=attempts, retry_at=retry_at,
+                last_error_type=error_type, last_error_category=category,
             ))
+            self._note_delivery_failure(
+                pending, error_type=error_type, category=category,
+                attempts=attempts, retry_at=retry_at,
+            )
             return retry_at
         self.storage.acknowledge_notification(pending)
         return None
+
+    def _note_delivery_failure(
+        self,
+        pending: PendingNotification,
+        *,
+        error_type: str,
+        category: str,
+        attempts: int,
+        retry_at: datetime | None,
+    ) -> None:
+        """Log the category only. Transport text can embed a webhook URL."""
+        emit = getattr(getattr(self.notifier, "jsonl", None), "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit(
+                "notification_delivery_failed",
+                notification_id=pending.notification_id,
+                flame_id=pending.flame_id,
+                account_id=pending.account_id,
+                error_type=error_type,
+                error_category=category,
+                attempts=attempts,
+                exhausted=retry_at is None,
+            )
+        except Exception:
+            return
 
     def maybe_alert_day_without_success(self, flame: FlameConfig, *, now: datetime) -> None:
         """Queue one business-day alert when reminder time passed with no SUCCESS."""

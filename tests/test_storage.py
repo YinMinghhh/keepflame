@@ -139,3 +139,40 @@ def test_corrupt_pending_notification_json_raises_storage_error(tmp_path: Path) 
         )
     with pytest.raises(StorageError, match="corrupt"):
         storage.get_notification(run.flame_id, run.account_id)
+
+
+def test_pending_notification_without_error_category_still_loads(tmp_path: Path) -> None:
+    import json
+    import sqlite3
+
+    from keepflame.core.models import PendingNotification
+
+    storage = SQLiteStorage(tmp_path / "state.sqlite3")
+    now = datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
+    run, state = record_at("run-1", "healthy", now)
+    notification = PendingNotification(
+        notification_id="n1",
+        flame_id=run.flame_id,
+        account_id=run.account_id,
+        event="flame_failed",
+        result=run.result,
+        occurred_at=now,
+        retry_at=now,
+        attempts=5,
+        last_error_type="SlackDeliveryError",
+    )
+    storage.record(run, state, notification)
+    with sqlite3.connect(storage.path) as db:
+        raw = db.execute("SELECT payload_json FROM pending_notifications").fetchone()[0]
+        payload = json.loads(raw)
+        payload.pop("last_error_category", None)
+        db.execute(
+            "UPDATE pending_notifications SET payload_json = ?",
+            (json.dumps(payload),),
+        )
+    loaded = storage.get_notification(run.flame_id, run.account_id)
+    assert loaded is not None
+    assert loaded.notification_id == "n1"
+    assert loaded.attempts == 5
+    assert loaded.last_error_category is None
+    assert loaded.last_error_type == "SlackDeliveryError"

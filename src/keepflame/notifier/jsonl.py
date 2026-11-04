@@ -33,7 +33,7 @@ class JsonlNotifier:
             self.stream.write(line + "\n")
             self.stream.flush()
 
-    def notify(
+    def notification_line(
         self,
         event: str,
         *,
@@ -42,7 +42,7 @@ class JsonlNotifier:
         account_id: str,
         result: KeepResult,
         occurred_at: datetime,
-    ) -> None:
+    ) -> str:
         payload = {
             "timestamp": occurred_at.astimezone(timezone.utc).isoformat(),
             "event": event,
@@ -59,8 +59,29 @@ class JsonlNotifier:
             "reward": None if result.reward is None else result.reward.to_dict(),
             "completion_receipt": None if result.receipt is None else result.receipt.to_dict(),
         }
-        line = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def write_line(self, line: str) -> None:
         with self._lock:
             self.stream.write(line + "\n")
             self.stream.flush()
+
+    def notify(
+        self,
+        event: str,
+        *,
+        notification_id: str,
+        flame_id: str,
+        account_id: str,
+        result: KeepResult,
+        occurred_at: datetime,
+    ) -> None:
+        self.write_line(self.notification_line(
+            event,
+            notification_id=notification_id,
+            flame_id=flame_id,
+            account_id=account_id,
+            result=result,
+            occurred_at=occurred_at,
+        ))
 

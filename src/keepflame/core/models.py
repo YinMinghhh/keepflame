@@ -263,6 +263,8 @@ class PendingNotification:
     reminder_at: datetime | None = None
     attempts: int = 0
     last_error_type: str | None = None
+    # Safe token such as timeout, proxy, http_503, or other. Never exception text.
+    last_error_category: str | None = None
     business_target: BusinessTarget | None = None
 
     def __post_init__(self) -> None:

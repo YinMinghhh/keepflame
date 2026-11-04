@@ -255,6 +255,13 @@ def test_failure_retries_one_two_four_eight_minutes_and_stops_after_five(tmp_pat
     pending = case.storage.get_notification("joinquant-primary", "primary")
     assert pending.attempts == 5 and pending.retry_at is None
     assert pending.last_error_type == "SlackDeliveryError"
+    assert pending.last_error_category == "other"
+    failures = [item for item in _jsonl(case) if item["event"] == "notification_delivery_failed"]
+    lifecycle = [item for item in _jsonl(case) if item["event"] == "human_action_required"]
+    assert len(lifecycle) == 1
+    assert [item["attempts"] for item in failures] == [1, 2, 3, 4, 5]
+    assert failures[-1]["exhausted"] is True and failures[-1]["error_category"] == "other"
+    assert all(item["error_type"] == "SlackDeliveryError" for item in failures)
     _tick(case, local(11, 9) + timedelta(minutes=16))
     assert len(fake.calls) == 5
     stored = case.storage.path.read_bytes()
@@ -286,6 +293,7 @@ def test_non_200_response_is_a_delivery_failure(tmp_path: Path, status: int) -> 
     _tick(case, local(11, 9))
     pending = case.storage.get_notification("joinquant-primary", "primary")
     assert pending.attempts == 1 and pending.last_error_type == "SlackDeliveryError"
+    assert pending.last_error_category == f"http_{status}"
 
 
 def test_unreadable_empty_or_foreign_webhook_files_fail_delivery_without_contacting_slack(tmp_path: Path) -> None:
@@ -295,11 +303,13 @@ def test_unreadable_empty_or_foreign_webhook_files_fail_delivery_without_contact
     _tick(empty, local(11, 9))
     foreign = _service(tmp_path, "foreign", [_human()], hook="https://example.invalid/services/T/B/SECRET-X")
     _tick(foreign, local(11, 9))
-    for case in (missing, empty, foreign):
+    expected = {"missing": "unreadable", "empty": "empty", "foreign": "invalid_address"}
+    for name, case in (("missing", missing), ("empty", empty), ("foreign", foreign)):
         state = case.storage.get_state("joinquant-primary", "primary")
         pending = case.storage.get_notification("joinquant-primary", "primary")
         assert state.status is KeepStatus.WAITING_HUMAN and state.message == "needs a person"
         assert pending.attempts == 1 and pending.last_error_type == "SlackDeliveryError"
+        assert pending.last_error_category == expected[name]
         assert case.slack.calls == []
         assert b"SECRET-X" not in case.storage.path.read_bytes()
 
@@ -336,12 +346,19 @@ def test_deliver_error_text_omits_the_address_and_transport_detail(tmp_path: Pat
     def rejected(_url, _payload, _timeout):
         raise urllib.error.HTTPError(HOOK, 403, f"forbidden {COOKIE}", {}, None)
 
-    for post in (explode, rejected):
-        with pytest.raises(SlackDeliveryError) as caught:
-            deliver(config, FileSecretResolver(), "text", post=post)
-        for rendered in (str(caught.value), repr(caught.value)):
-            assert "SYNTHETIC-WEBHOOK-TOKEN" not in rendered and COOKIE not in rendered
-        assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=explode)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert caught.value.category == "other"
+    for rendered in (str(caught.value), repr(caught.value)):
+        assert "SYNTHETIC-WEBHOOK-TOKEN" not in rendered and COOKIE not in rendered
+
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=rejected)
+    assert isinstance(caught.value.__cause__, urllib.error.HTTPError)
+    assert caught.value.category == "http_403"
+    for rendered in (str(caught.value), repr(caught.value)):
+        assert "SYNTHETIC-WEBHOOK-TOKEN" not in rendered and COOKIE not in rendered
 
     class Broken(FileSecretResolver):
         def read_text(self, reference):
@@ -349,6 +366,8 @@ def test_deliver_error_text_omits_the_address_and_transport_detail(tmp_path: Pat
 
     with pytest.raises(SlackDeliveryError) as caught:
         deliver(config, Broken(), "text", post=lambda *_args: 200)
+    assert isinstance(caught.value.__cause__, SecretReadError)
+    assert caught.value.category == "unreadable"
     assert "SYNTHETIC-WEBHOOK-TOKEN" not in str(caught.value)
 
 
@@ -400,6 +419,7 @@ def test_email_and_slack_are_independent_and_a_failure_does_not_duplicate_the_ot
     assert len(case.messages) == 1          # mail went out although Slack failed
     pending = case.storage.get_notification("joinquant-primary", "primary")
     assert pending.attempts == 1 and pending.last_error_type == "SlackDeliveryError"
+    assert pending.last_error_category == "other"
     fake.fail = False
     _tick(case, local(11, 9) + timedelta(minutes=1))
     assert len(case.messages) == 1          # not re-mailed on the Slack retry
@@ -421,6 +441,7 @@ def test_email_and_slack_are_independent_and_a_failure_does_not_duplicate_the_ot
     _tick(neither, local(11, 9))
     pending = neither.storage.get_notification("joinquant-primary", "primary")
     assert pending.last_error_type == "ChannelDeliveryError"
+    assert pending.last_error_category == "email:other,slack:other"
     assert pending.attempts == 1
 
 
@@ -577,3 +598,165 @@ def test_disabled_and_enabled_dry_runs_never_read_the_webhook_file(tmp_path: Pat
         payload = json.loads(capsys.readouterr().out)
         assert payload["event"] == "dry_run" and payload["database_opened"] is False
         assert "hooks.slack.com" not in json.dumps(payload)
+
+
+def test_transport_failure_keeps_the_cause_and_a_safe_category(tmp_path: Path, monkeypatch) -> None:
+    import errno
+
+    hook = tmp_path / "cause.webhook"
+    write_secret(hook, HOOK)
+    config = load_config(_write(tmp_path, "cause", slack=True, hook_file=hook)).slack
+
+    def boom(exc):
+        def post(_url, _payload, _timeout):
+            raise exc
+        return post
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:7897"})
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=boom(urllib.error.URLError(TimeoutError("timed out"))))
+    assert isinstance(caught.value.__cause__, urllib.error.URLError)
+    assert caught.value.category == "timeout"
+    assert HOOK not in str(caught.value)
+
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=boom(
+            urllib.error.URLError(OSError("Tunnel connection failed: 403 Proxy Unavailable")),
+        ))
+    assert caught.value.__cause__ is not None
+    assert caught.value.category == "proxy"
+    assert "Proxy Unavailable" not in str(caught.value)
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    refused = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"))
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=boom(refused))
+    assert caught.value.category == "other"
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:7897"})
+    with pytest.raises(SlackDeliveryError) as caught:
+        deliver(config, FileSecretResolver(), "text", post=boom(
+            urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")),
+        ))
+    assert caught.value.category == "proxy"
+    assert "127.0.0.1" not in str(caught.value) and HOOK not in str(caught.value)
+
+
+def test_timeout_category_is_stored_and_logged_without_the_webhook(tmp_path: Path) -> None:
+    def timeout(_url, _payload, _timeout):
+        raise urllib.error.URLError(TimeoutError("timed out talking to " + HOOK))
+
+    case = _service(tmp_path, "timeout", [_human()], post=timeout)
+    _tick(case, local(11, 9))
+    pending = case.storage.get_notification("joinquant-primary", "primary")
+    assert pending.last_error_type == "SlackDeliveryError"
+    assert pending.last_error_category == "timeout"
+    failed = [item for item in _jsonl(case) if item["event"] == "notification_delivery_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_category"] == "timeout"
+    assert failed[0]["error_type"] == "SlackDeliveryError"
+    assert "timed out talking" not in case.stream.getvalue()
+    assert HOOK not in case.stream.getvalue()
+    assert HOOK.encode() not in case.storage.path.read_bytes()
+
+
+def test_lifecycle_jsonl_is_written_once_per_process_for_the_same_payload(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, "jsonl", slack=False))
+    stream = io.StringIO()
+    notifier = LifecycleNotifier(JsonlNotifier(stream), ConfigView(config), FileSecretResolver())
+    occurred = local(11, 9)
+    fields = dict(
+        notification_id="same-id", flame_id="joinquant-primary", account_id="primary",
+        result=_human(), occurred_at=occurred,
+    )
+    notifier.notify("human_action_required", **fields)
+    notifier.notify("human_action_required", **fields)
+    assert stream.getvalue().count("\n") == 1
+    changed = _human()
+    changed = KeepResult(changed.status, "different message", metadata=changed.metadata, human_action=changed.human_action)
+    notifier.notify("human_action_required", **{**fields, "result": changed})
+    assert stream.getvalue().count("\n") == 2
+    restarted = io.StringIO()
+    LifecycleNotifier(JsonlNotifier(restarted), ConfigView(config), FileSecretResolver()).notify(
+        "human_action_required", **fields,
+    )
+    assert restarted.getvalue().count("\n") == 1
+    assert json.loads(restarted.getvalue())["notification_id"] == "same-id"
+
+
+def test_notify_retry_requeues_exhausted_deliveries_without_resending_mail(tmp_path: Path, capsys) -> None:
+    from keepflame.cli import main
+
+    fake = FakeSlack(fail=True)
+    case = _service(tmp_path, "requeue", [_human()], slack=True, mail=True, post=fake)
+    _tick(case, local(11, 9))
+    for minute in (1, 3, 7, 15):
+        _tick(case, local(11, 9) + timedelta(minutes=minute))
+    pending = case.storage.get_notification("joinquant-primary", "primary")
+    assert pending.attempts == 5 and pending.retry_at is None
+    notification_id = pending.notification_id
+    assert len(case.messages) == 1 and len(fake.calls) == 5
+    runs = case.storage.count_runs()
+
+    assert main(["notify", "retry", "--config", str(case.path)]) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["executed"] is False and planned["delivery_attempted"] is False
+    assert planned["count"] == 1
+    assert planned["notifications"][0]["notification_id"] == notification_id
+    assert planned["notifications"][0]["previous_attempts"] == 5
+    assert planned["notifications"][0]["retry_at"] is None
+    assert planned["notifications"][0]["last_error_category"] == "other"
+    assert HOOK not in json.dumps(planned)
+    still = case.storage.get_notification("joinquant-primary", "primary")
+    assert still.attempts == 5 and still.retry_at is None
+
+    assert main(["notify", "retry", "--config", str(case.path), "--flame", "missing"]) == 1
+    assert json.loads(capsys.readouterr().err)["error_type"] == "ConfigError"
+
+    assert main(["notify", "retry", "--config", str(case.path), "--execute"]) == 0
+    requeued = json.loads(capsys.readouterr().out)
+    assert requeued["executed"] is True and requeued["delivery_attempted"] is False
+    assert requeued["count"] == 1
+    item = requeued["notifications"][0]
+    assert item["notification_id"] == notification_id
+    assert item["attempts"] == 0 and item["previous_attempts"] == 5
+    assert item["retry_at"] is not None
+    armed = case.storage.get_notification("joinquant-primary", "primary")
+    assert armed.notification_id == notification_id
+    assert armed.attempts == 0 and armed.retry_at is not None
+    assert armed.event == "human_action_required"
+    assert case.storage.count_runs() == runs
+
+    assert main(["notify", "retry", "--config", str(case.path), "--execute"]) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["count"] == 0
+    assert case.storage.get_notification("joinquant-primary", "primary").attempts == 0
+
+    _tick(case, local(11, 9) + timedelta(minutes=16))
+    assert len(fake.calls) == 5
+    flame = case.config.enabled_flames()[0]
+    fake.fail = False
+    case.service.orchestrator.deliver_pending(flame, now=armed.retry_at)
+    assert len(fake.calls) == 6
+    assert len(case.messages) == 1
+    assert case.storage.get_notification("joinquant-primary", "primary") is None
+    lifecycle = [row for row in _jsonl(case) if row["event"] == "human_action_required"]
+    assert len(lifecycle) == 1
+    assert lifecycle[0]["notification_id"] == notification_id
+    assert HOOK not in case.stream.getvalue()
+
+
+def test_notify_retry_leaves_an_open_budget_alone(tmp_path: Path, capsys) -> None:
+    from keepflame.cli import main
+
+    fake = FakeSlack(fail=True)
+    case = _service(tmp_path, "open-budget", [_human()], post=fake)
+    _tick(case, local(11, 9))
+    before = case.storage.get_notification("joinquant-primary", "primary")
+    assert before.attempts == 1 and before.retry_at is not None
+    assert main(["notify", "retry", "--config", str(case.path), "--execute", "--flame", "joinquant-primary"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 0 and payload["delivery_attempted"] is False
+    after = case.storage.get_notification("joinquant-primary", "primary")
+    assert after.attempts == 1 and after.retry_at == before.retry_at
+    assert len(fake.calls) == 1

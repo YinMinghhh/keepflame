@@ -172,6 +172,35 @@ instead of showing all three as generic success or failure.
 Notifications should be useful and restrained. Prefer summaries and actionable
 alerts over a message for every routine internal step.
 
+Outbox delivery is one pending notification per Flame account, shared by JSONL
+and any enabled email or Slack channel. Each event gets five attempts, spaced
+1/2/4/8 minutes. After that, `retry_at` is null and the daemon stops. Automatic
+retry stays conservative. `keepflame notify retry` lists those exhausted rows
+from the existing database. `keepflame notify retry --execute` (optional
+`--flame`) opens another five-attempt budget: attempts return to 0, `retry_at`
+becomes now, and the notification id, event, and result stay as recorded. It
+does not POST, send mail, or rewrite run history. A running service delivers
+enabled Flames on its next tick; a stopped service delivers after the next
+start. A second `--execute` does nothing while a budget is already open. Rows
+for a disabled Flame are requeued, and the service delivers them only after
+that Flame is enabled.
+
+Slack delivery keeps the causing exception (`raise ... from exc`). The outbox
+and the `notification_delivery_failed` JSONL line store only the exception type
+and a category token: `timeout`, `proxy` (tunnel/proxy text, or a connection
+failure while an HTTP(S) proxy is configured), `http_<status>`, `other`, plus
+`unreadable`, `empty`, and `invalid_address` for the webhook file. Exception
+text is not logged or stored, because a transport error can contain the webhook
+URL. One channel failing stores that channel's category; both failing stores
+`email:…,slack:…`. A retry still skips a channel that already accepted the same
+notification id in this process.
+
+JSONL idempotency: within one process, an identical lifecycle payload for a
+notification id is written once. Each failed attempt still appends its own
+`notification_delivery_failed` line. After a restart, the lifecycle line may be
+written once more, and a channel that succeeded before the crash may send once
+more. Consumers dedupe on `notification_id`. `notify retry` does not mint a new id.
+
 ## Implementation guidance
 
 - Keep the core unaware of whether a Keeper uses HTTP, Telegram, or a browser.

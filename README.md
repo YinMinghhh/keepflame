@@ -117,7 +117,7 @@ SIGTERM/Ctrl-C 停止领取新任务，等待本轮有界流程完成并关闭�
 
 SQLite schema v4 从 v1/v2/v3 事务迁移，保留动作、暂停、登录请求和执行历史，新增 daemon owner 与单次运行请求。交接客户端只接受已存在的 v4 库，不创建或迁移数据库；旧服务必须在后续获准升级时采用新代码。本轮开发只迁移新建合成库。回退源码前先核对数据库兼容性；不要恢复旧状态快照后直接重新领取。浏览器凭据与图片均不打包。挑战图片只在内存中处理，不写截图/HAR/视频；持久 profile 的其他浏览器缓存并未承诺完全为空。
 
-通知保持 stdout JSONL 和有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟，错误只记类型。可选邮箱与 Slack 渠道使用同一 outbox，默认关闭，不连接真实邮箱或 Slack；两者可同时开或只开其一，互不拖累，某一渠道失败重试时不会重发已成功的渠道。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
+通知保持 stdout JSONL 和有界 outbox：单事件最多 5 次投递，间隔 1/2/4/8 分钟。失败记下异常类型和安全分类（`timeout`、`proxy`、`http_<状态码>`、`other`；Slack 读 Webhook 失败另有 `unreadable`、`empty`、`invalid_address`），不记录 Webhook、口令或传输异常原文。可选邮箱与 Slack 使用同一 outbox，默认关闭，不连接真实邮箱或 Slack；某一渠道失败重试时不会重发本进程里已成功的渠道。5 次用尽后不再自动投递。`keepflame notify retry --config <路径>` 只列出用尽的待办；加上 `--execute`（可用 `--flame ID`）沿用原来的 `notification_id` 再给 5 次预算，命令本身不发信。正在运行的服务下一轮会投递仍启用的 Flame，服务停着则等下次启动。同一进程里相同的生命周期 JSONL 只写一次，每次失败另写一行 `notification_delivery_failed`；进程重启后可能再写一条相同的生命周期记录，按 `notification_id` 去重。LaunchAgent 输出日志不会自行轮转，启用服务器前需落实文档中的保留方案。
 
 更多细节见 [聚宽接入](src/keepflame/flames/joinquant/README.md) 和 [请求协议及预算](src/keepflame/flames/joinquant/PROTOCOL.md)。本机技术验证不代表平台许可，真实操作范围仍需独立确认。
 

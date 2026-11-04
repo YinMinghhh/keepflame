@@ -152,6 +152,7 @@ def test_notification_retries_after_restart_without_new_remote_check(tmp_path):
     pending = storage.get_notification(flame().id, flame().account_id)
     assert pending.attempts == 1
     assert pending.last_error_type == "OSError"
+    assert pending.last_error_category == "other"
     assert storage.get_state(flame().id, flame().account_id).last_reminder_at is None
     _, restarted, storage, keeper, clock, _ = setup(
         tmp_path, [], storage=SQLiteStorage(storage.path), notifier=notifier,

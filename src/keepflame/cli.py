@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from keepflame.core.config import ConfigError, FlameConfig, default_config_path, load_config
+from keepflame.core.delivery import rearm_exhausted
 from keepflame.core.models import FlameState, KeepStatus, RunOutcome
 from keepflame.core.plugins import PluginError, EntryPointKeeperRegistry
 from keepflame.core.protocols import AutomationPaused, ArchiveError
@@ -62,6 +63,19 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument('--evidence', type=Path, required=True, help='reviewed source commit and evidence digests only')
         if name == "status":
             command.add_argument("--json", action="store_true", dest="as_json")
+    notify = subparsers.add_parser("notify", help="notification outbox")
+    notify_commands = notify.add_subparsers(dest="notify_command", required=True)
+    retry = notify_commands.add_parser(
+        "retry",
+        help="list exhausted outbox deliveries, or requeue them with --execute",
+    )
+    retry.add_argument("--config", type=Path, default=default_config_path(), help="runtime TOML configuration path")
+    retry.add_argument("--flame", help="limit to one configured Flame")
+    retry.add_argument(
+        "--execute",
+        action="store_true",
+        help="requeue exhausted deliveries for another 5-attempt budget; default only lists them",
+    )
     from keepflame.flames.ikuuu.cli import add_parser as add_ikuuu_parser
     add_ikuuu_parser(subparsers, default_config_path())
     from keepflame.flames.tushare.cli import add_parser as add_tushare_parser
@@ -178,6 +192,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
             "retry_at": None if pending.retry_at is None else pending.retry_at.isoformat(),
             "delivery_exhausted": pending.retry_at is None,
             "last_error_type": pending.last_error_type,
+            "last_error_category": pending.last_error_category,
         }
     if as_json:
         print(
@@ -203,7 +218,10 @@ def _status(runtime: Runtime, as_json: bool) -> int:
         delivery = item.get("notification")
         if isinstance(delivery, dict):
             print(f"  NOTIFICATION: {delivery['event']} attempts={delivery['attempts']} "
-                  f"retry={delivery['retry_at'] or 'exhausted; check delivery channel'}")
+                  f"retry={delivery['retry_at'] or 'exhausted'} "
+                  f"category={delivery.get('last_error_category') or '-'}")
+            if delivery.get("delivery_exhausted"):
+                print("  DELIVERY: exhausted; keepflame notify retry --execute")
         action = item.get("human_action")
         if isinstance(action, dict):
             print(f"  HUMAN: {action['summary']}")
@@ -332,6 +350,58 @@ def _control(runtime, args):
     return 0
 
 
+def _notify_retry(args) -> int:
+    """List exhausted outbox rows, or give them another bounded budget.
+
+    Does not POST to Slack or send mail. The running service delivers on its
+    next tick; a stopped service delivers after it next starts. The notification
+    id is kept, so this does not create a second outbox event.
+    """
+    if args.notify_command != "retry":
+        raise AssertionError(f"unhandled notify command: {args.notify_command}")
+    config = load_config(args.config)
+    if args.flame is not None and not any(flame.id == args.flame for flame in config.flames):
+        raise ConfigError(f"configured flame not found: {args.flame}")
+    storage = SQLiteStorage(config.storage.path, existing_only=True)
+    now = datetime.now(timezone.utc)
+    enabled = {(flame.id, flame.account_id): flame.enabled for flame in config.flames}
+    rows = storage.list_notifications()
+    if args.flame is not None:
+        rows = [row for row in rows if row.flame_id == args.flame]
+    reported = []
+    for pending in rows:
+        if pending.retry_at is not None:
+            continue
+        previous_attempts = pending.attempts
+        current = pending
+        if args.execute:
+            updated = rearm_exhausted(pending, now=now)
+            if updated is None:
+                continue
+            storage.update_notification(updated)
+            current = updated
+        reported.append({
+            "notification_id": current.notification_id,
+            "flame_id": current.flame_id,
+            "account_id": current.account_id,
+            "event": current.event,
+            "attempts": current.attempts,
+            "previous_attempts": previous_attempts,
+            "retry_at": None if current.retry_at is None else current.retry_at.isoformat(),
+            "last_error_type": current.last_error_type,
+            "last_error_category": current.last_error_category,
+            "enabled": enabled.get((current.flame_id, current.account_id)),
+        })
+    print(json.dumps({
+        "event": "notification_retry",
+        "executed": bool(args.execute),
+        "delivery_attempted": False,
+        "count": len(reported),
+        "notifications": reported,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def _owner_line(event: str, **fields) -> None:
     print(json.dumps({"event": event, **fields}, sort_keys=True, separators=(",", ":")))
     sys.stdout.flush()
@@ -349,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
                 return ikuuu_main(args)
             except CookieError as exc:
                 return _error(str(exc), type(exc).__name__)
+        if args.command == "notify":
+            return _notify_retry(args)
         if args.command == "tushare":
             from keepflame.flames.tushare.cli import main as tushare_main
             from keepflame.flames.tushare.cookies import CookieError as TushareCookieError
