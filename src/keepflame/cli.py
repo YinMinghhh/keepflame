@@ -416,10 +416,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ikuuu":
             from keepflame.flames.ikuuu.cli import main as ikuuu_main
             from keepflame.flames.ikuuu.cookies import CookieError
-            from keepflame.flames.ikuuu.session import CredentialError
             try:
                 return ikuuu_main(args)
-            except (CookieError, CredentialError) as exc:
+            except CookieError as exc:
                 return _error(str(exc), type(exc).__name__)
         if args.command == "notify":
             return _notify_retry(args)

@@ -108,11 +108,16 @@ class LoginWindow(RequestPanel):
             return "timeout"
 
 
-def _route(allowed: set[str]):
+def _route(allowed: set[str], origin_host: str):
+    """GET may load the origin and known asset hosts. Credential-bearing methods stay on the origin."""
     def handle(route):
         target = urlsplit(route.request.url)
-        method = getattr(route.request, "method", "")
-        if (target.scheme != "https" or target.port not in (None, 443) or target.hostname not in allowed
+        method = getattr(route.request, "method", "GET").upper()
+        host = target.hostname
+        credential_method = method in {"POST", "PUT", "PATCH", "DELETE"}
+        if (target.scheme != "https" or target.port not in (None, 443) or host is None
+                or (credential_method and host != origin_host)
+                or (not credential_method and host not in allowed)
                 or (method == "POST" and target.path.startswith("/user/checkin"))):
             route.abort("blockedbyclient")
             return
@@ -161,7 +166,7 @@ def open_panel(*, profile_dir: str, account_id: str, origin: str,
                     args=["--disable-background-networking", "--disable-component-update"],
                 )
                 if login_window:
-                    context.route("**/*", _route(allowed))
+                    context.route("**/*", _route(allowed, parts.hostname))
                     context.route_web_socket("**/*", lambda socket: socket.close())
                     yield LoginWindow(context, origin)
                 else:

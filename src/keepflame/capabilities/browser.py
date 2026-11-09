@@ -39,10 +39,29 @@ def _allowed_chrome_marker(name: str, target: str) -> bool:
     return name == "RunningChromeVersion" and bool(re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", target))
 
 
+_EVERYDAY_DIR_NAMES = frozenset({
+    "google-chrome", "google-chrome-beta", "google-chrome-unstable",
+    "chromium", "microsoft edge", "brave-browser", "bravesoftware",
+})
+
+
+def everyday_chrome_profile(path: Path) -> bool:
+    """True when the path is inside a normal Chrome/Chromium user-data directory."""
+    parts = [part.casefold() for part in path.parts]
+    for index, part in enumerate(parts):
+        if part in _EVERYDAY_DIR_NAMES:
+            return True
+        if part == "chrome" and index and parts[index - 1] == "google":
+            return True
+    return False
+
+
 def validate_profile(reference: str, account_id: str) -> Path:
     path = Path(reference)
     if not path.is_absolute() or path.resolve() != path or not path.is_dir():
         raise ProfileNotAuthorized("a dedicated absolute browser profile is required")
+    if everyday_chrome_profile(path):
+        raise ProfileNotAuthorized("everyday Chrome profiles cannot be enrolled")
     if any((parent / ".git").exists() for parent in (path, *path.parents)):
         raise ProfileNotAuthorized("browser profiles must be outside repositories")
     if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:

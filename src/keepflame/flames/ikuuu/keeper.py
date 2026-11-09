@@ -23,9 +23,7 @@ from keepflame.flames.ikuuu.discovery import (
     BROWSER_UA, DEFAULT_HOST_PATTERN, DEFAULT_NAV_SEEDS, LOGIN_PATH, DomainFinder, DomainSource,
     looks_like_login, normalize_base,
 )
-from keepflame.flames.ikuuu.session import (
-    CredentialError, challenge_markers, classify_login, login_form, parse_credentials, redirect_evidence,
-)
+from keepflame.flames.ikuuu.session import challenge_markers, redirect_evidence
 
 CHECKIN_PATH = "/user/checkin"
 ACTION_KIND = "IKUUU_LOGIN_REQUIRED"
@@ -40,17 +38,10 @@ _SUMMARIES = {
     "cookie_unreadable": "ikuuu Cookie 文件不存在或权限不是 600",
     "cookie_invalid": "ikuuu Cookie 文件格式无效",
     "cookie_unbound": "ikuuu Cookie 未绑定登录域名",
-    "challenge_required": "ikuuu 登录页有验证码或额外验证，需要人工完成",
-    "credentials_rejected": "ikuuu 保存的登录凭据被站点拒绝",
-    "credentials_unreadable": "ikuuu 凭据文件不存在或权限不是 600",
-    "credentials_invalid": "ikuuu 凭据文件格式无效",
-    "login_not_established": "ikuuu 登录提交后签到会话仍不可用",
-    "login_unexpected": "ikuuu 登录响应无法归类，已停止重试",
+    "challenge_required": "ikuuu 登录页有验证码、二步验证，或页面无法确认，需要人工完成",
     "profile_not_enrolled": "ikuuu 专用浏览器目录尚未登记",
     "browser_busy": "ikuuu 专用浏览器正在被另一个流程使用",
 }
-# A failed password or an unusable login response is not retried on the same business day.
-_NO_REPEAT_LOGIN = {"credentials_rejected", "login_not_established", "login_unexpected"}
 
 
 class _Settings:
@@ -61,14 +52,14 @@ class _Settings:
                 raise ValueError(key)
             return value
 
+        if "credential_file" in settings:
+            # A mode-600 file is not encryption, and the public login page cannot be
+            # submitted safely. The key is rejected rather than stored or sent.
+            raise ValueError("credential_file")
         profile = text("browser_profile_dir")
         if profile is not None and not profile.startswith("/"):
             raise ValueError("browser_profile_dir")
         self.profile = profile
-        credential_file = text("credential_file")
-        if credential_file is not None and not credential_file.startswith("/"):
-            raise ValueError("credential_file")
-        self.credential_file = credential_file
         cookie_file = text("cookie_file")
         if profile is None:
             if cookie_file is None or not cookie_file.startswith("/"):
@@ -320,7 +311,7 @@ class IkuuuKeeper:
         try:
             with opener(profile_dir=settings.profile, account_id=context.account_id, origin=base,
                         allowed_hosts=(), headless=True) as client:
-                return self._profile_checkin(context, client, settings, base, metadata, previous)
+                return self._profile_checkin(context, client, settings, base, metadata)
         except ProfileNotAuthorized:
             return self._human(context, base, "profile_not_enrolled", metadata, profile=True)
         except ProfileInUse:
@@ -331,7 +322,7 @@ class IkuuuKeeper:
                 raise
             return self._failed("browser_unavailable", {**metadata, "error_type": exc.reason})
 
-    def _profile_checkin(self, context, client, settings, base, metadata, previous) -> KeepResult:
+    def _profile_checkin(self, context, client, settings, base, metadata) -> KeepResult:
         from keepflame.flames.ikuuu.panel import PanelError
 
         try:
@@ -341,65 +332,24 @@ class IkuuuKeeper:
         result = self._checkin_response(context, settings, response, base, metadata, profile=True)
         if result.status is not KeepStatus.WAITING_HUMAN or result.metadata.get("reason") != "session_expired":
             return result
-        return self._renew(context, client, settings, base, result.metadata, previous)
+        return self._blocked_renewal(context, client, base, result.metadata)
 
-    def _renew(self, context, client, settings, base, metadata, previous) -> KeepResult:
+    def _blocked_renewal(self, context, client, base, metadata) -> KeepResult:
+        """The profile does not renew a rejected session. Missing markers are not a login."""
         from keepflame.flames.ikuuu.panel import PanelError
 
+        noted = {**metadata, "renewal": "not_attempted"}
         try:
             page = client.request("GET", base + LOGIN_PATH, headers=self._profile_headers(base, login=True))
         except PanelError as exc:
-            return self._failed("login_page_unreachable", {**metadata, "error_type": exc.reason})
+            return self._human(context, base, "challenge_required",
+                               {**noted, "error_type": exc.reason, "evidence": "login_page_unread"}, profile=True)
         markers = list(challenge_markers(page.body))
         if markers:
             return self._human(context, base, "challenge_required",
-                               {**metadata, "challenge_markers": markers, "evidence": "login_document"}, profile=True)
-        if not settings.credential_file:
-            return self._human(context, base, "session_expired", metadata, profile=True)
-        try:
-            credentials = parse_credentials(context.secrets.read_text(settings.credential_file))
-        except SecretReadError:
-            return self._human(context, base, "credentials_unreadable", metadata, profile=True)
-        except CredentialError:
-            return self._human(context, base, "credentials_invalid", metadata, profile=True)
-        auth_tag = credentials.fingerprint
-        metadata = {**metadata, "auth_tag": auth_tag}
-        if self._login_already_refused(previous, context, auth_tag):
-            return self._human(context, base, str(previous.metadata.get("reason")),
-                               {**metadata, "network": "skipped_repeated_login"}, profile=True)
-        try:
-            submitted = client.request(
-                "POST", base + LOGIN_PATH,
-                headers={**self._profile_headers(base, login=True), "Content-Type": "application/x-www-form-urlencoded"},
-                body=login_form(page.body, credentials),
-            )
-        except PanelError as exc:
-            return self._failed("login_transport_error", {**metadata, "error_type": exc.reason})
-        kind = classify_login(submitted, base)
-        if kind == "challenge":
-            return self._human(context, base, "challenge_required", {**metadata, "evidence": "login_response"}, profile=True)
-        if kind == "rejected":
-            return self._human(context, base, "credentials_rejected", metadata, profile=True)
-        if kind != "accepted":
-            return self._human(context, base, "login_unexpected", metadata, profile=True)
-        try:
-            response = client.request("POST", base + CHECKIN_PATH, headers=self._profile_headers(base), body=b"")
-        except PanelError as exc:
-            return self._failed("checkin_transport_error", {**metadata, "error_type": exc.reason})
-        result = self._checkin_response(context, settings, response, base, metadata, profile=True)
-        if result.status is KeepStatus.WAITING_HUMAN and result.metadata.get("reason") == "session_expired":
-            return self._human(context, base, "login_not_established", metadata, profile=True)
-        return result
-
-    @staticmethod
-    def _login_already_refused(previous, context, auth_tag: str) -> bool:
-        if previous is None or previous.status is not KeepStatus.WAITING_HUMAN:
-            return False
-        if previous.metadata.get("reason") not in _NO_REPEAT_LOGIN:
-            return False
-        if previous.metadata.get("auth_tag") != auth_tag:
-            return False
-        return context.business_target is not None and previous.last_checked_target == context.business_target
+                               {**noted, "challenge_markers": markers, "evidence": "login_document"}, profile=True)
+        return self._human(context, base, "session_expired",
+                           {**noted, "challenge_markers": [], "evidence": "no_challenge_marker"}, profile=True)
 
     @staticmethod
     def _profile_headers(base: str, *, login: bool = False) -> dict[str, str]:

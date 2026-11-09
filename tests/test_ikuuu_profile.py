@@ -14,8 +14,6 @@ from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import parse_qs
-
 import pytest
 
 from keepflame.capabilities import CapabilityRegistry
@@ -28,13 +26,10 @@ from keepflame.core.models import KeepStatus
 from keepflame.core.orchestrator import Orchestrator
 from keepflame.flames.ikuuu import IkuuuKeeper
 from keepflame.flames.ikuuu.panel import PanelError, open_panel
-from keepflame.flames.ikuuu.session import challenge_markers, extra_hosts, parse_credentials, write_credentials
+from keepflame.capabilities.browser import everyday_chrome_profile, validate_profile
+from keepflame.flames.ikuuu.session import challenge_markers, extra_hosts
 from tests.helpers import FakeNotifier, FixedClock, MemoryStorage, StaticRegistry
 from tests.test_ikuuu import NOW, ZONE, FakeHttp, flame, nav_routes
-
-PASSWORD = "synthetic-password"
-EMAIL = "synthetic@example.invalid"
-
 
 def enroll(tmp_path) -> Path:
     parent = tmp_path / "profiles"
@@ -114,12 +109,6 @@ def run(tmp_path, panel, *, config, storage=None, notifier=None, now=NOW, http=N
     return runner.run_flame(config, now=now), storage, notifier
 
 
-def store_auth(tmp_path):
-    path = tmp_path / "ikuuu.auth"
-    write_credentials(path, parse_credentials(json.dumps({"email": EMAIL, "password": PASSWORD})))
-    return path
-
-
 def dumped(outcome, notifier) -> str:
     return json.dumps([outcome.record.result.metadata, outcome.record.result.message,
                        [str(event) for event in notifier.events]], ensure_ascii=False)
@@ -147,52 +136,50 @@ def test_valid_profile_session_checks_in_without_reading_a_cookie_file(tmp_path)
     assert notifier.events == []
 
 
-def test_geetest_document_stops_before_any_password_post(tmp_path):
+def test_geetest_document_stops_and_does_not_post_credentials(tmp_path):
     profile = enroll(tmp_path)
-    store_auth(tmp_path)
     panel = Scripted([checkin(False), challenge_login()])
-    outcome, _, notifier = run(
-        tmp_path, panel, config=profile_config(tmp_path, profile, credential_file=str(tmp_path / "ikuuu.auth")))
+    outcome, _, notifier = run(tmp_path, panel, config=profile_config(tmp_path, profile))
     result = outcome.record.result
     assert result.status is KeepStatus.WAITING_HUMAN and result.metadata["reason"] == "challenge_required"
+    assert result.metadata["renewal"] == "not_attempted"
     assert result.metadata["challenge_markers"] == ["geetest", "mfa"]
     assert panel.calls == [("POST", "https://ikuuu.pw/user/checkin"), ("GET", "https://ikuuu.pw/auth/login")]
+    assert all(body == b"" for body in panel.bodies)
     assert "ikuuu login" in result.human_action.instructions and "--execute" in result.human_action.instructions
-    assert PASSWORD not in dumped(outcome, notifier)
     assert [event["event"] for event in notifier.events] == ["human_action_required"]
 
 
-def test_plain_form_submits_once_and_a_rejected_password_is_not_repeated_the_same_day(tmp_path):
+def test_missing_challenge_markers_do_not_become_a_login(tmp_path):
     profile = enroll(tmp_path)
-    store_auth(tmp_path)
-    config = profile_config(tmp_path, profile, credential_file=str(tmp_path / "ikuuu.auth"))
-    rejected = response(200, "https://ikuuu.pw/auth/login", json.dumps({"ret": 0, "msg": "邮箱或者密码错误"}).encode())
-    first_panel = Scripted([checkin(False), plain_login(), rejected])
-    storage, notifier = MemoryStorage(), FakeNotifier()
-    first, storage, notifier = run(tmp_path, first_panel, config=config, storage=storage, notifier=notifier)
-    assert first.record.result.metadata["reason"] == "credentials_rejected"
-    assert len(first_panel.calls) == 3 and first_panel.calls[2][0] == "POST"
-    sent = parse_qs(first_panel.bodies[2].decode())
-    assert sent["email"] == [EMAIL] and sent["password"] == [PASSWORD] and sent["remember"] == ["on"]
-    assert PASSWORD not in dumped(first, notifier)
-    second_panel = Scripted([checkin(False), plain_login()])
-    second, _, notifier = run(
-        tmp_path, second_panel, config=config, storage=storage, notifier=notifier, now=NOW + timedelta(hours=1))
-    assert second.record.result.metadata["network"] == "skipped_repeated_login"
-    assert second_panel.calls == [("POST", "https://ikuuu.pw/user/checkin"), ("GET", "https://ikuuu.pw/auth/login")]
-    assert [event["event"] for event in notifier.events] == ["human_action_required"]
+    panel = Scripted([checkin(False), plain_login()])
+    outcome, _, notifier = run(tmp_path, panel, config=profile_config(tmp_path, profile))
+    result = outcome.record.result
+    assert result.metadata["reason"] == "session_expired"
+    assert result.metadata["renewal"] == "not_attempted"
+    assert result.metadata["challenge_markers"] == []
+    assert result.metadata["evidence"] == "no_challenge_marker"
+    assert panel.calls == [("POST", "https://ikuuu.pw/user/checkin"), ("GET", "https://ikuuu.pw/auth/login")]
+    assert not any(url.endswith("/auth/login") and method == "POST" for method, url in panel.calls)
+    assert "password" not in dumped(outcome, notifier)
 
 
-def test_login_that_does_not_establish_a_session_is_not_looped(tmp_path):
+def test_unreadable_login_document_fails_closed(tmp_path):
     profile = enroll(tmp_path)
-    store_auth(tmp_path)
-    accepted = response(200, "https://ikuuu.pw/auth/login", b'{"ret":1,"msg":"ok"}')
-    panel = Scripted([checkin(False), plain_login(), accepted, checkin(False)])
-    outcome, _, notifier = run(
-        tmp_path, panel, config=profile_config(tmp_path, profile, credential_file=str(tmp_path / "ikuuu.auth")))
-    assert outcome.record.result.metadata["reason"] == "login_not_established"
-    assert [call[0] for call in panel.calls] == ["POST", "GET", "POST", "POST"]
-    assert PASSWORD not in dumped(outcome, notifier)
+    broken = response(200, "https://ikuuu.pw/auth/login", b'<script>originBody = "AAAAAAAAAAAAA===";</script>')
+    panel = Scripted([checkin(False), broken])
+    outcome, _, _ = run(tmp_path, panel, config=profile_config(tmp_path, profile))
+    assert outcome.record.result.metadata["reason"] == "challenge_required"
+    assert outcome.record.result.metadata["challenge_markers"] == ["unreadable_document"]
+    assert panel.calls[-1][0] == "GET"
+
+
+def test_credential_file_setting_is_rejected(tmp_path):
+    profile = enroll(tmp_path)
+    outcome, _, _ = run(
+        tmp_path, Scripted([]), config=profile_config(tmp_path, profile, credential_file="/tmp/not-used"))
+    assert outcome.record.result.metadata["automation_paused"] is True
+    assert outcome.record.result.metadata["setting"] == "credential_file"
 
 
 def test_missing_credentials_ask_for_the_login_window(tmp_path):
@@ -206,11 +193,13 @@ def test_missing_credentials_ask_for_the_login_window(tmp_path):
 
 
 def test_profile_file_remembers_acceptance_for_a_later_opener(tmp_path):
-    """Two Scripted clients share a file. This does not launch Chrome or call ikuuu."""
+    """A file written between openers stands in for the profile. Not Chrome and not ikuuu.
+
+    The keeper does not create that file. A human login outside this process does.
+    """
     profile = enroll(tmp_path)
-    store_auth(tmp_path)
     state = tmp_path / "accepted"
-    config = profile_config(tmp_path, profile, credential_file=str(tmp_path / "ikuuu.auth"))
+    config = profile_config(tmp_path, profile)
 
     class Disk:
         def __init__(self):
@@ -219,8 +208,7 @@ def test_profile_file_remembers_acceptance_for_a_later_opener(tmp_path):
         def request(self, method, url, *, headers, body=b""):
             self.calls.append((method, url))
             if method == "POST" and url.endswith("/auth/login"):
-                state.write_text("accepted")
-                return response(200, url, b'{"ret":1,"msg":"ok"}')
+                raise AssertionError("profile renewal must not post the login form")
             if method == "POST" and url.endswith("/user/checkin"):
                 if state.exists():
                     return checkin(True, "20MB")
@@ -229,13 +217,14 @@ def test_profile_file_remembers_acceptance_for_a_later_opener(tmp_path):
 
     first = Disk()
     outcome, storage, notifier = run(tmp_path, first, config=config)
-    assert outcome.record.result.status is KeepStatus.SUCCESS and state.read_text() == "accepted"
+    assert outcome.record.result.metadata["renewal"] == "not_attempted" and not state.exists()
+    state.write_text("accepted")
     second = Disk()
     outcome, _, notifier = run(tmp_path, second, config=config, storage=storage, notifier=notifier,
                                now=NOW + timedelta(days=1))
     assert outcome.record.result.status is KeepStatus.SUCCESS
     assert second.calls == [("POST", "https://ikuuu.pw/user/checkin")]
-    assert PASSWORD not in dumped(outcome, notifier)
+    assert "password" not in dumped(outcome, notifier)
 
 
 def test_human_login_between_runs_is_a_recovery_not_another_waiting_alert(tmp_path):
@@ -417,6 +406,9 @@ def test_open_panel_relaunches_the_same_directory_and_hides_set_cookie(monkeypat
         posted = FakeRoute("https://ikuuu.pw/user/checkin", "POST")
         route(posted)
         assert posted.aborted == "blockedbyclient"
+        leaked = FakeRoute("https://static.geetest.com/collect", "POST")
+        route(leaked)
+        assert leaked.aborted == "blockedbyclient"
         allowed = FakeRoute("https://static.geetest.com/v4.js")
         route(allowed)
         assert allowed.fulfilled is True
@@ -447,7 +439,6 @@ stop_at = "23:00"
 [flames.settings]
 browser_profile_dir = "{profile}"
 base_url = "https://ikuuu.pw"
-credential_file = "{tmp_path}/ikuuu.auth"
 nav_seeds = ["https://ikuuu.bar/"]
 """)
     assert cli_main(["ikuuu", "enroll-profile", "--config", str(config), "--flame", "ikuuu-primary"]) == 0
@@ -460,14 +451,8 @@ nav_seeds = ["https://ikuuu.bar/"]
     rejected = tmp_path / "repo-config.toml"
     rejected.write_text(repo_config)
     assert cli_main(["ikuuu", "enroll-profile", "--config", str(rejected), "--execute"]) != 0
-    from keepflame.flames.ikuuu.cli import import_credentials, login_window
+    from keepflame.flames.ikuuu.cli import login_window
     from types import SimpleNamespace
-    out = __import__("io").StringIO()
-    args = SimpleNamespace(config=config, flame="ikuuu-primary")
-    assert import_credentials(args, prompts=lambda: (EMAIL, PASSWORD), out=out) == 0
-    printed = out.getvalue()
-    assert PASSWORD not in printed and EMAIL not in printed
-    assert stat.S_IMODE((tmp_path / "ikuuu.auth").stat().st_mode) == 0o600
     out = __import__("io").StringIO()
     args = SimpleNamespace(config=config, flame="ikuuu-primary", execute=False)
     assert login_window(args, out=out) == 0
@@ -475,7 +460,7 @@ nav_seeds = ["https://ikuuu.bar/"]
     assert plan["dry_run"] is True and plan["browser_opened"] is False and plan["network"] is False
     assert plan["checkin_performed"] is False and plan["cookies_read"] is False
     captured = capsys.readouterr()
-    assert PASSWORD not in captured.out + captured.err
+    assert "uid=" not in captured.out + captured.err and "password" not in (captured.out + captured.err).casefold()
 
 
 def test_login_execute_opens_the_window_and_does_not_check_in(tmp_path):
@@ -534,3 +519,84 @@ nav_seeds = ["https://ikuuu.bar/"]
     assert record["window"] == "closed" and seen["url"] == "https://ikuuu.pw/auth/login"
     assert seen["headless"] is False and "static.geetest.com" in seen["hosts"]
     assert "SYNTHETIC" not in out.getvalue()
+
+
+def test_everyday_chrome_directory_is_not_a_keepflame_profile(tmp_path):
+    root = tmp_path / "Google" / "Chrome"
+    root.mkdir(parents=True, mode=0o700)
+    (tmp_path / "Google").chmod(0o700)
+    profile = root / "Default"
+    profile.mkdir(mode=0o700)
+    marker = profile / ".keepflame-profile.json"
+    marker.write_text(json.dumps({"version": 1, "account_id": "primary", "purpose": "keepflame"}, separators=(",", ":")))
+    marker.chmod(0o600)
+    assert everyday_chrome_profile(profile) is True
+    with pytest.raises(ProfileNotAuthorized):
+        validate_profile(str(profile), "primary")
+
+
+def test_history_reports_stored_traffic_without_secret_metadata(tmp_path):
+    import sqlite3
+    from keepflame.flames.ikuuu.cli import history
+    from keepflame.storage.sqlite import SQLiteStorage
+
+    database = tmp_path / "state.sqlite3"
+    SQLiteStorage(database)
+    secret = "synthetic-password"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """INSERT INTO keep_runs(
+               run_id, flame_id, account_id, started_at, finished_at, status, message, metadata_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("run-1", "ikuuu-primary", "primary", "2026-11-06T00:59:00+00:00", "2026-11-06T00:59:01+00:00",
+         "SUCCESS", "你获得了 144MB 流量",
+         json.dumps({"traffic_gained": "144MB", "checkin_state": "checked_in", "password": secret, "cookie": "uid=1"})),
+    )
+    connection.commit()
+    connection.close()
+    config = tmp_path / "config.toml"
+    config.write_text(f"""
+[storage]
+path = "{database}"
+[[flames]]
+id = "ikuuu-primary"
+keeper = "ikuuu"
+account_id = "primary"
+enabled = false
+[flames.schedule]
+timezone = "Asia/Shanghai"
+first_window_start = "08:30"
+first_window_end = "10:30"
+recheck_minutes = 60
+reminder_at = "20:00"
+stop_at = "23:00"
+[flames.settings]
+cookie_file = "{tmp_path}/missing.cookie"
+nav_seeds = ["https://ikuuu.bar/"]
+""")
+    out = __import__("io").StringIO()
+    args = SimpleNamespace(config=config, flame="ikuuu-primary", since="2026-11-05", limit=20)
+    assert history(args, out=out) == 0
+    record = json.loads(out.getvalue())
+    assert record["read_only"] is True and record["writes"] is False
+    assert "started_at" in record["columns"] and "metadata_json" in record["columns"]
+    observed = record["runs"][0]["observed"]
+    assert observed["traffic_gained"] == "144MB" and observed["checkin_state"] == "checked_in"
+    assert record["runs"][0]["secret_keys_omitted"] == 2
+    assert secret not in out.getvalue() and "uid=1" not in out.getvalue()
+
+    sparse = tmp_path / "sparse.sqlite3"
+    connection = sqlite3.connect(sparse)
+    connection.execute("CREATE TABLE keep_runs (flame_id TEXT, note TEXT)")
+    connection.execute("INSERT INTO keep_runs VALUES ('ikuuu-primary', 'ignored')")
+    connection.commit()
+    connection.close()
+    sparse_config = tmp_path / "sparse.toml"
+    sparse_config.write_text(config.read_text().replace(str(database), str(sparse)))
+    out = __import__("io").StringIO()
+    args = SimpleNamespace(config=sparse_config, flame="ikuuu-primary", since="2026-11-05", limit=20)
+    assert history(args, out=out) == 1
+    sparse_record = json.loads(out.getvalue())
+    assert sparse_record["error"] == "started_at_column_missing"
+    assert sparse_record["columns"] == ["flame_id", "note"]
+    assert "144MB" not in out.getvalue()
