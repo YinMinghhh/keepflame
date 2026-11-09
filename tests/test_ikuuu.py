@@ -266,7 +266,7 @@ def test_expired_session_waits_for_a_human_with_login_url_and_import_command(tmp
     result = outcome.record.result
     assert result.status is KeepStatus.WAITING_HUMAN and result.metadata["reason"] == "session_expired"
     assert result.human_action.url == "https://ikuuu.pw/auth/login"
-    assert "keepflame ikuuu import-cookie --flame ikuuu-primary --base https://ikuuu.pw" in result.human_action.instructions
+    assert "-m keepflame ikuuu import-cookie --flame ikuuu-primary --base https://ikuuu.pw" in result.human_action.instructions
     assert [e["event"] for e in notifier.events] == ["human_action_required"]  # immediate alert
     text = render_lifecycle_message(event="human_action_required", notification_id="n", flame_id="ikuuu-primary",
                                     account_id="primary", result=result)
@@ -500,6 +500,57 @@ def test_rfc6265_quoted_cookie_value_is_accepted_and_kept_verbatim(tmp_path):
     for bad in ('uid="abc', 'uid=abc"', 'uid="a"b"', 'uid=a"b', 'uid="a,b"', 'uid="'):
         with pytest.raises(CookieError):
             parse_import(bad)
+
+
+def test_auth_redirect_records_the_path_and_drops_the_query(tmp_path):
+    store_cookie(tmp_path)
+    routes = nav_routes()
+    routes[("POST", "https://ikuuu.pw/user/checkin")] = lambda r: ok(
+        r.url, b"", 302, {"Location": "https://ikuuu.pw/auth/login?next=/user&ticket=SYNTHETIC-REDIRECT"})
+    outcome, _, notifier = run(tmp_path, FakeHttp(routes))
+    meta = outcome.record.result.metadata
+    assert outcome.record.result.status is KeepStatus.WAITING_HUMAN
+    assert meta["evidence"] == "redirect" and meta["redirect_path"] == "/auth/login"
+    assert "redirect_host" not in meta
+    assert "SYNTHETIC-REDIRECT" not in dumped(outcome, notifier)
+
+
+def test_repeated_success_is_stored_but_not_written_as_another_lifecycle_event(tmp_path):
+    """A SUCCESS after SUCCESS updates the run history and does not emit a lifecycle line.
+
+    This is why an out.log search for remote status 200 can miss a later check-in.
+    The fake HTTP response is not a live ikuuu result.
+    """
+    store_cookie(tmp_path)
+    routes = nav_routes()
+    routes[("POST", "https://ikuuu.pw/user/checkin")] = checkin_json({"ret": 1, "msg": "你获得了 144MB 流量"})
+    storage, notifier = MemoryStorage(), FakeNotifier()
+    first, storage, notifier = run(tmp_path, FakeHttp(routes), storage=storage, notifier=notifier)
+    assert first.record.result.status is KeepStatus.SUCCESS and notifier.events == []
+    second, storage, notifier = run(
+        tmp_path, FakeHttp(routes), storage=storage, notifier=notifier, now=NOW + timedelta(days=1))
+    assert second.record.result.status is KeepStatus.SUCCESS and notifier.events == []
+    assert len(storage.runs) == 2
+    state = storage.states[("ikuuu-primary", "primary")]
+    assert state.last_success_at == second.record.finished_at
+    assert second.record.result.metadata["traffic_gained"] == "144MB"
+
+
+def test_same_day_reminder_stays_waiting_human(tmp_path):
+    store_cookie(tmp_path)
+    routes = nav_routes()
+    routes[("POST", "https://ikuuu.pw/user/checkin")] = lambda r: ok(r.url, b"", 302, {"Location": "/auth/login"})
+    storage, notifier = MemoryStorage(), FakeNotifier()
+    run(tmp_path, FakeHttp(routes), storage=storage, notifier=notifier)
+    later = NOW.astimezone(ZONE).replace(hour=20, minute=30).astimezone(timezone.utc)
+    quiet = FakeHttp(routes)
+    second, storage, notifier = run(tmp_path, quiet, storage=storage, notifier=notifier, now=later)
+    assert quiet.requests == []
+    assert second.record.result.status is KeepStatus.WAITING_HUMAN
+    assert second.record.result.metadata["network"] == "skipped_unchanged_import"
+    assert [event["event"] for event in notifier.events] == ["human_action_required", "human_action_reminder"]
+    state = storage.states[("ikuuu-primary", "primary")]
+    assert state.status is KeepStatus.WAITING_HUMAN and state.last_success_at is None
 
 
 def test_checkin_transport_error_records_the_cause_type(tmp_path):

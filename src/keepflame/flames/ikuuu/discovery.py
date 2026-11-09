@@ -121,15 +121,23 @@ def hosts_in_page(html: str) -> tuple[list[str], list[str]]:
     return hosts + plain, methods
 
 
-def looks_like_login(body: bytes) -> bool:
-    """True for the panel login form, including its base64 document.write wrapper."""
+def rendered_document(body: bytes) -> str | None:
+    """Login HTML, after the public originBody wrapper. None when that wrapper does not decode."""
     text = body.decode("utf-8", "replace")
     match = _ORIGIN_BODY.search(text)
-    if match:
-        try:
-            text = base64.b64decode(match.group(1)).decode("utf-8", "replace")
-        except (binascii.Error, ValueError):
-            return False
+    if not match:
+        return text
+    try:
+        return base64.b64decode(match.group(1)).decode("utf-8", "replace")
+    except (binascii.Error, ValueError):
+        return None
+
+
+def looks_like_login(body: bytes) -> bool:
+    """True for the panel login form, including its base64 document.write wrapper."""
+    text = rendered_document(body)
+    if text is None:
+        return False
     lowered = text.lower()
     return ('name="email"' in lowered and ('name="password"' in lowered or 'name="passwd"' in lowered)
             and ("/auth/login" in lowered or "登录" in text))

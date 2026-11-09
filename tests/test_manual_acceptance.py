@@ -6,6 +6,7 @@ Fake keepers, fake HTTP and temporary databases only; nothing contacts a real se
 import io
 import json
 import shlex
+import sys
 from datetime import timedelta
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ import pytest
 from keepflame.capabilities import CapabilityRegistry
 from keepflame.capabilities.secrets import FileSecretResolver
 from keepflame.cli import main
+from keepflame.entrypoint import module_command
 from keepflame.core.models import KeepResult, KeepStatus
 from keepflame.core.orchestrator import Orchestrator
 from keepflame.notifier.slack import render_lifecycle_message
@@ -62,7 +64,7 @@ def test_ikuuu_login_alert_includes_the_quoted_daemon_config(tmp_path):
     routes[("POST", "https://ikuuu.pw/user/checkin")] = ikuuu.checkin_json({"ret": -1, "msg": "请登录后再操作"})
     runner = _orchestrator(ikuuu.IkuuuKeeper(sleeper=lambda _s: None), ikuuu.FakeHttp(routes), ikuuu.NOW, SERVER_CONFIG)
     result = runner.run_flame(ikuuu.flame(tmp_path), now=ikuuu.NOW).record.result
-    command = (f"pbpaste | keepflame ikuuu import-cookie --config {shlex.quote(SERVER_CONFIG)} "
+    command = (f"pbpaste | {module_command()} ikuuu import-cookie --config {shlex.quote(SERVER_CONFIG)} "
                "--flame ikuuu-primary --base https://ikuuu.pw")
     assert command in result.human_action.instructions and command in _slack(result, "ikuuu-primary")
     assert "SYNTHETIC-SECRET-KEY" not in _slack(result, "ikuuu-primary")
@@ -221,7 +223,9 @@ def test_cli_force_generates_a_request_id_and_prints_how_to_check(tmp_path, monk
         assert shlex.quote(str(path.resolve())) in record["check_with"]
         runtime.poll_controls()
         assert keeper.calls == 1
-        assert main(shlex.split(record["check_with"])[1:]) == 0
+        argv = shlex.split(record["check_with"])
+        assert argv[:3] == [sys.executable, "-m", "keepflame"]
+        assert main(argv[3:]) == 0
         assert json.loads(capsys.readouterr().out)["execution_completed"] is True
 
 
@@ -234,7 +238,7 @@ def test_cli_force_without_a_daemon_suggests_a_standalone_run(tmp_path, monkeypa
                  "--via-daemon", "--force", "--execute"]) == 1
     error = json.loads(capsys.readouterr().err)
     assert error["error_type"] == "DispatchError"
-    assert f"keepflame run-once --config {shlex.quote(str(path.resolve()))} --flame joinquant-primary --execute" in error["message"]
+    assert f"{shlex.quote(sys.executable)} -m keepflame run-once --config {shlex.quote(str(path.resolve()))} --flame joinquant-primary --execute" in error["message"]
 
 
 def test_force_requires_via_daemon(tmp_path, capsys, monkeypatch):

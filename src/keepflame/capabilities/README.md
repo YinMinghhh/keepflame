@@ -14,6 +14,8 @@ profile 登记还检查父目录可控、内部数据链接和所有权；扫描
 
 CLI 执行器现使用 BrowserPool：同一进程保留每个 profile 的唯一上下文，检查 profile/account/origin 绑定，每轮关闭全部任务页，仅进程关闭时退出 Chrome。登录窗口与任务页串行；账号忙碌时拒绝借用。默认 GUI 模式供未来官方人工登录，测试可显式 headless。`open(headless=False)` 即使池按 headless 构造也会可见启动；省略该参数时仍沿用构造时的 headless。账号上限8，不自动重开失效上下文；单次 OwnedBrowserSession 接口仍供受控集成使用。
 
+`exclusive_profile` 使用同一把 `.keepflame-owner.lock`。ikuuu 的短生命周期上下文也取这把锁，避免与常驻 owner 同时打开同一目录。
+
 `keepflame run --execute` 对每个已启用浏览器 profile 持有一把独占锁，并先打开一个可见窗口。签到和阅读共用一个 profile 时只启动一个窗口，人工登录和两件每日任务都在这个窗口里进行。第二个启动在校验 profile 内容和启动 Chrome 之前退出。锁在本进程关闭浏览器之后才释放。
 
 服务器首次登记专用目录时（仅在另行获准后），目录必须是当前运行用户拥有的绝对路径、0700，父目录不可组/其他用户写，且位于任何Git仓库之外。新空目录内创建0600的 `.keepflame-profile.json`，内容严格为 `{"version":1,"account_id":"primary","purpose":"keepflame"}`，account_id须与配置一致。不要重用日常Chrome目录或修改已有profile归属。该标记只登记目录身份，不含凭据也不证明已登录；随后再用正式login控制流。

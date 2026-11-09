@@ -11,14 +11,20 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
 
+from keepflame.capabilities.browser import ProfileNotAuthorized
 from keepflame.capabilities.http import HttpClient, HttpRequest, HttpResponse, HttpTransportError, transport_error_type
+from keepflame.capabilities.profile_owner import ProfileInUse
 from keepflame.capabilities.secrets import SecretReadError
 from keepflame.core.models import FAILURE_CLASS_TRANSPORT, HumanAction, JsonValue, KeepResult, KeepStatus
 from keepflame.core.protocols import KeeperContext
+from keepflame.entrypoint import module_command
 from keepflame.flames.ikuuu.cookies import CookieError, SessionCookie, load_file
 from keepflame.flames.ikuuu.discovery import (
     BROWSER_UA, DEFAULT_HOST_PATTERN, DEFAULT_NAV_SEEDS, LOGIN_PATH, DomainFinder, DomainSource,
     looks_like_login, normalize_base,
+)
+from keepflame.flames.ikuuu.session import (
+    CredentialError, challenge_markers, classify_login, login_form, parse_credentials, redirect_evidence,
 )
 
 CHECKIN_PATH = "/user/checkin"
@@ -34,7 +40,17 @@ _SUMMARIES = {
     "cookie_unreadable": "ikuuu Cookie 文件不存在或权限不是 600",
     "cookie_invalid": "ikuuu Cookie 文件格式无效",
     "cookie_unbound": "ikuuu Cookie 未绑定登录域名",
+    "challenge_required": "ikuuu 登录页有验证码或额外验证，需要人工完成",
+    "credentials_rejected": "ikuuu 保存的登录凭据被站点拒绝",
+    "credentials_unreadable": "ikuuu 凭据文件不存在或权限不是 600",
+    "credentials_invalid": "ikuuu 凭据文件格式无效",
+    "login_not_established": "ikuuu 登录提交后签到会话仍不可用",
+    "login_unexpected": "ikuuu 登录响应无法归类，已停止重试",
+    "profile_not_enrolled": "ikuuu 专用浏览器目录尚未登记",
+    "browser_busy": "ikuuu 专用浏览器正在被另一个流程使用",
 }
+# A failed password or an unusable login response is not retried on the same business day.
+_NO_REPEAT_LOGIN = {"credentials_rejected", "login_not_established", "login_unexpected"}
 
 
 class _Settings:
@@ -45,8 +61,19 @@ class _Settings:
                 raise ValueError(key)
             return value
 
+        profile = text("browser_profile_dir")
+        if profile is not None and not profile.startswith("/"):
+            raise ValueError("browser_profile_dir")
+        self.profile = profile
+        credential_file = text("credential_file")
+        if credential_file is not None and not credential_file.startswith("/"):
+            raise ValueError("credential_file")
+        self.credential_file = credential_file
         cookie_file = text("cookie_file")
-        if cookie_file is None or not cookie_file.startswith("/"):
+        if profile is None:
+            if cookie_file is None or not cookie_file.startswith("/"):
+                raise ValueError("cookie_file")
+        elif cookie_file is not None and not cookie_file.startswith("/"):
             raise ValueError("cookie_file")
         self.cookie_file = cookie_file
         self.host_pattern = text("host_pattern", DEFAULT_HOST_PATTERN)
@@ -62,6 +89,8 @@ class _Settings:
         base = text("base_url")
         self.base_url = normalize_base(base, self.host_pattern) if base else None
         if base and self.base_url is None:
+            raise ValueError("base_url")
+        if profile and self.base_url is None:
             raise ValueError("base_url")
         self.max_probes = _int(settings, "max_probes", 8, 1, 20)
         self.timeout = float(_int(settings, "timeout_seconds", 15, 3, 60))
@@ -114,29 +143,38 @@ class IkuuuKeeper:
     business_timezone = "Asia/Shanghai"
 
     def __init__(self, *, sleeper: Callable[[float], None] = time.sleep,
-                 extra_sources: Iterable[DomainSource] = ()) -> None:
+                 extra_sources: Iterable[DomainSource] = (), panel_opener=None) -> None:
         self.sleeper = sleeper
         self.extra_sources = tuple(extra_sources)
+        self.panel_opener = panel_opener
 
     # -- results --------------------------------------------------------------------
     @staticmethod
-    def _login_action(flame_id: str, base: str | None, reason: str, config_path: str | None = None) -> HumanAction:
+    def _login_action(flame_id: str, base: str | None, reason: str, config_path: str | None = None, *,
+                      profile: bool = False) -> HumanAction:
         login_url = f"{base}{LOGIN_PATH}" if base else None
         base_arg = f" --base {base}" if base else " --base https://<当前域名>"
         config_arg = f" --config {shlex.quote(config_path)}" if config_path else ""
+        command = module_command()
+        flame = shlex.quote(flame_id)
+        steps = []
+        if profile:
+            steps.append("在运行服务的那台机器上打开专用浏览器，自行完成验证码或二步验证后关闭窗口："
+                         f"{command} ikuuu login{config_arg} --flame {flame} --execute")
+        steps.append("或从已登录的浏览器复制 Cookie 后，在同一台机器执行："
+                     f"pbpaste | {command} ikuuu import-cookie{config_arg} --flame {flame}{base_arg}")
         return HumanAction(
             kind=ACTION_KIND,
             summary=_SUMMARIES.get(reason, "ikuuu 需要重新登录"),
-            instructions=(f"在浏览器打开登录页完成登录（含验证码），复制 Cookie 后在 KeepFlame 主机执行："
-                          f"pbpaste | keepflame ikuuu import-cookie{config_arg} --flame {shlex.quote(flame_id)}{base_arg}"),
+            instructions=" ".join(steps),
             url=login_url,
         )
 
-    def _human(self, context, base, reason, metadata) -> KeepResult:
+    def _human(self, context, base, reason, metadata, *, profile: bool = False) -> KeepResult:
         return KeepResult(
             KeepStatus.WAITING_HUMAN, f"ikuuu check-in needs a fresh login: {reason}",
             metadata={**metadata, "reason": reason, "base_url": base},
-            human_action=self._login_action(context.flame_id, base, reason, context.config_path),
+            human_action=self._login_action(context.flame_id, base, reason, context.config_path, profile=profile),
         )
 
     @staticmethod
@@ -162,17 +200,19 @@ class IkuuuKeeper:
 
         cookie: SessionCookie | None = None
         cookie_problem = None
-        try:
-            cookie = load_file(context.secrets.read_text(settings.cookie_file), host_pattern=settings.host_pattern)
-        except SecretReadError:
-            cookie_problem = "cookie_unreadable"
-        except CookieError:
-            cookie_problem = "cookie_invalid"
-        fingerprint = cookie.fingerprint if cookie is not None else cookie_problem
+        if isinstance(settings.cookie_file, str):
+            try:
+                cookie = load_file(context.secrets.read_text(settings.cookie_file), host_pattern=settings.host_pattern)
+            except SecretReadError:
+                cookie_problem = "cookie_unreadable"
+            except CookieError:
+                cookie_problem = "cookie_invalid"
+        fingerprint = cookie.fingerprint if cookie is not None else (cookie_problem or "profile")
         metadata["import_tag"] = fingerprint
 
         # Still waiting on the same cookie today: no new requests, same action.
-        if (previous is not None and previous.status is KeepStatus.WAITING_HUMAN
+        # A dedicated profile is not skipped: the operator may have logged in since the last run.
+        if (settings.profile is None and previous is not None and previous.status is KeepStatus.WAITING_HUMAN
                 and previous_meta.get("reason") in HUMAN_REASONS
                 and previous_meta.get("import_tag") == fingerprint
                 and context.business_target is not None
@@ -203,6 +243,12 @@ class IkuuuKeeper:
                 # No request got any HTTP response and no cookie was sent: use the network budget.
                 failed.update({"failure_class": FAILURE_CLASS_TRANSPORT, "error_type": found.error_type})
             return self._failed("domain_discovery_failed", failed)
+        if settings.profile is not None:
+            if settings.base_url != base:
+                # The enrolled profile is pinned to the configured origin. Never open it on another host.
+                return self._human(context, base, "domain_changed",
+                                   {**metadata, "configured_base_url": settings.base_url}, profile=True)
+            return self._keep_profile(context, settings, base, metadata, previous)
         if cookie_problem is not None:
             return self._human(context, base, cookie_problem, metadata)
         if bound != base:
@@ -210,35 +256,39 @@ class IkuuuKeeper:
             return self._human(context, base, "domain_changed", {**metadata, "imported_for_base_url": bound})
         return self._checkin(context, http, settings, cookie, base, metadata)
 
-    def _checkin(self, context, http, settings, cookie, base, metadata) -> KeepResult:
+    def _checkin(self, context, http, settings, cookie, base, metadata, *, profile: bool = False,
+                 response: HttpResponse | None = None) -> KeepResult:
         now = context.clock.now() if context.clock is not None else context.now
-        request = HttpRequest("POST", base + CHECKIN_PATH, headers={
-            "User-Agent": BROWSER_UA, "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest", "Origin": base, "Referer": base + "/user",
-            "Cookie": cookie.header,
-        }, body=b"")
-        try:
-            response = http.send(request, timeout_seconds=settings.timeout)
-        except HttpTransportError as exc:
-            # The check-in POST is not retried in-run (no remote pre-check) and stays a business
-            # failure: the request may have reached the server. Only the cause is recorded.
-            return self._failed("checkin_transport_error", {**metadata, "error_type": transport_error_type(exc)})
+        if response is None:
+            request = HttpRequest("POST", base + CHECKIN_PATH, headers={
+                "User-Agent": BROWSER_UA, "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest", "Origin": base, "Referer": base + "/user",
+                "Cookie": cookie.header,
+            }, body=b"")
+            try:
+                response = http.send(request, timeout_seconds=settings.timeout)
+            except HttpTransportError as exc:
+                # The check-in POST is not retried in-run (no remote pre-check) and stays a business
+                # failure: the request may have reached the server. Only the cause is recorded.
+                return self._failed("checkin_transport_error", {**metadata, "error_type": transport_error_type(exc)})
         metadata = {**metadata, "remote_status": response.status}
         if response.status in {301, 302, 303, 307, 308}:
             location = response.header("location") or ""
             target = urlsplit(urljoin(base + CHECKIN_PATH, location))
+            evidence = redirect_evidence(base, location, host_pattern=settings.host_pattern)
             if target.path.startswith("/auth/"):
-                return self._human(context, base, "session_expired", metadata)
-            return self._failed("checkin_unexpected_redirect", metadata)
+                return self._human(context, base, "session_expired", {**metadata, **evidence}, profile=profile)
+            return self._failed("checkin_unexpected_redirect", {**metadata, **evidence})
         if response.status in {401, 403}:
-            return self._human(context, base, "session_expired", metadata)
+            return self._human(context, base, "session_expired", {**metadata, "evidence": "http_status"}, profile=profile)
         if response.status != 200:
             return self._failed("checkin_http_error", metadata, next_action_at=_retry_after(response, now))
         try:
             payload = json.loads(response.body.decode("utf-8"))
         except (UnicodeError, ValueError):
             if looks_like_login(response.body):
-                return self._human(context, base, "session_expired", metadata)
+                return self._human(context, base, "session_expired",
+                                   {**metadata, "evidence": "login_document"}, profile=profile)
             return self._failed("checkin_not_json", metadata)
         if not isinstance(payload, dict):
             return self._failed("checkin_not_json", metadata)
@@ -257,5 +307,111 @@ class IkuuuKeeper:
                 "checked_in_at": now.astimezone(timezone.utc).isoformat(),
             })
         if message and _LOGIN_HINT.search(message):
-            return self._human(context, base, "session_expired", metadata)
+            return self._human(context, base, "session_expired", {**metadata, "evidence": "login_message"}, profile=profile)
         return self._failed("checkin_rejected", {**metadata, "base_url": base})
+
+    # -- dedicated profile ----------------------------------------------------------
+    def _keep_profile(self, context, settings, base, metadata, previous) -> KeepResult:
+        metadata = {**metadata, "channel": "profile"}
+        opener = self.panel_opener
+        if opener is None:
+            from keepflame.flames.ikuuu.panel import open_panel
+            opener = open_panel
+        try:
+            with opener(profile_dir=settings.profile, account_id=context.account_id, origin=base,
+                        allowed_hosts=(), headless=True) as client:
+                return self._profile_checkin(context, client, settings, base, metadata, previous)
+        except ProfileNotAuthorized:
+            return self._human(context, base, "profile_not_enrolled", metadata, profile=True)
+        except ProfileInUse:
+            return self._human(context, base, "browser_busy", metadata, profile=True)
+        except Exception as exc:
+            from keepflame.flames.ikuuu.panel import PanelError
+            if not isinstance(exc, PanelError):
+                raise
+            return self._failed("browser_unavailable", {**metadata, "error_type": exc.reason})
+
+    def _profile_checkin(self, context, client, settings, base, metadata, previous) -> KeepResult:
+        from keepflame.flames.ikuuu.panel import PanelError
+
+        try:
+            response = client.request("POST", base + CHECKIN_PATH, headers=self._profile_headers(base), body=b"")
+        except PanelError as exc:
+            return self._failed("checkin_transport_error", {**metadata, "error_type": exc.reason})
+        result = self._checkin_response(context, settings, response, base, metadata, profile=True)
+        if result.status is not KeepStatus.WAITING_HUMAN or result.metadata.get("reason") != "session_expired":
+            return result
+        return self._renew(context, client, settings, base, result.metadata, previous)
+
+    def _renew(self, context, client, settings, base, metadata, previous) -> KeepResult:
+        from keepflame.flames.ikuuu.panel import PanelError
+
+        try:
+            page = client.request("GET", base + LOGIN_PATH, headers=self._profile_headers(base, login=True))
+        except PanelError as exc:
+            return self._failed("login_page_unreachable", {**metadata, "error_type": exc.reason})
+        markers = list(challenge_markers(page.body))
+        if markers:
+            return self._human(context, base, "challenge_required",
+                               {**metadata, "challenge_markers": markers, "evidence": "login_document"}, profile=True)
+        if not settings.credential_file:
+            return self._human(context, base, "session_expired", metadata, profile=True)
+        try:
+            credentials = parse_credentials(context.secrets.read_text(settings.credential_file))
+        except SecretReadError:
+            return self._human(context, base, "credentials_unreadable", metadata, profile=True)
+        except CredentialError:
+            return self._human(context, base, "credentials_invalid", metadata, profile=True)
+        auth_tag = credentials.fingerprint
+        metadata = {**metadata, "auth_tag": auth_tag}
+        if self._login_already_refused(previous, context, auth_tag):
+            return self._human(context, base, str(previous.metadata.get("reason")),
+                               {**metadata, "network": "skipped_repeated_login"}, profile=True)
+        try:
+            submitted = client.request(
+                "POST", base + LOGIN_PATH,
+                headers={**self._profile_headers(base, login=True), "Content-Type": "application/x-www-form-urlencoded"},
+                body=login_form(page.body, credentials),
+            )
+        except PanelError as exc:
+            return self._failed("login_transport_error", {**metadata, "error_type": exc.reason})
+        kind = classify_login(submitted, base)
+        if kind == "challenge":
+            return self._human(context, base, "challenge_required", {**metadata, "evidence": "login_response"}, profile=True)
+        if kind == "rejected":
+            return self._human(context, base, "credentials_rejected", metadata, profile=True)
+        if kind != "accepted":
+            return self._human(context, base, "login_unexpected", metadata, profile=True)
+        try:
+            response = client.request("POST", base + CHECKIN_PATH, headers=self._profile_headers(base), body=b"")
+        except PanelError as exc:
+            return self._failed("checkin_transport_error", {**metadata, "error_type": exc.reason})
+        result = self._checkin_response(context, settings, response, base, metadata, profile=True)
+        if result.status is KeepStatus.WAITING_HUMAN and result.metadata.get("reason") == "session_expired":
+            return self._human(context, base, "login_not_established", metadata, profile=True)
+        return result
+
+    @staticmethod
+    def _login_already_refused(previous, context, auth_tag: str) -> bool:
+        if previous is None or previous.status is not KeepStatus.WAITING_HUMAN:
+            return False
+        if previous.metadata.get("reason") not in _NO_REPEAT_LOGIN:
+            return False
+        if previous.metadata.get("auth_tag") != auth_tag:
+            return False
+        return context.business_target is not None and previous.last_checked_target == context.business_target
+
+    @staticmethod
+    def _profile_headers(base: str, *, login: bool = False) -> dict[str, str]:
+        # User-Agent is left to the profile's Chrome so a device-bound cookie matches the login.
+        referer = base + (LOGIN_PATH if login else "/user")
+        return {
+            "Accept": "application/json, text/javascript, */*; q=0.01" if not login else "text/html,application/xhtml+xml",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": base,
+            "Referer": referer,
+        }
+
+    def _checkin_response(self, context, settings, response, base, metadata, *, profile: bool) -> KeepResult:
+        """Classify one check-in response that the profile client already received."""
+        return self._checkin(context, None, settings, None, base, metadata, profile=profile, response=response)
