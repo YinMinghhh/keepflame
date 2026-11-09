@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from keepflame.capabilities.browser import ProfileNotAuthorized, validate_profile
@@ -59,6 +60,16 @@ def prepare_visible_owner(runtime, profiles: list[tuple[str, str, str]]) -> int:
     for profile, account_id, origin in profiles:
         pool.open_visible(profile_dir=profile, account_id=account_id, origin=origin)
     return pool.launch_count
+
+
+@contextmanager
+def exclusive_profile(profile: str):
+    """Hold the profile owner lock for one browser launch. A second process gets ProfileInUse."""
+    handle = _lock(profile)
+    try:
+        yield
+    finally:
+        _release([handle])
 
 
 def _lock(profile: str) -> int:

@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from keepflame.core.config import ConfigError, FlameConfig, default_config_path, load_config
+from keepflame.entrypoint import module_command
 from keepflame.core.delivery import rearm_exhausted
 from keepflame.core.models import FlameState, KeepStatus, RunOutcome
 from keepflame.core.plugins import PluginError, EntryPointKeeperRegistry
@@ -221,7 +222,7 @@ def _status(runtime: Runtime, as_json: bool) -> int:
                   f"retry={delivery['retry_at'] or 'exhausted'} "
                   f"category={delivery.get('last_error_category') or '-'}")
             if delivery.get("delivery_exhausted"):
-                print("  DELIVERY: exhausted; keepflame notify retry --execute")
+                print(f"  DELIVERY: exhausted; {module_command()} notify retry --execute")
         action = item.get("human_action")
         if isinstance(action, dict):
             print(f"  HUMAN: {action['summary']}")
@@ -493,10 +494,10 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(exc, StorageError) or str(exc).startswith('no executing daemon'):
                     raise DispatchError(
                         f'{exc}. No KeepFlame service is running for this configuration; for a one-off '
-                        f'manual run use: keepflame run-once --config {config_arg} --flame {shlex.quote(flame.id)} '
+                        f'manual run use: {module_command()} run-once --config {config_arg} --flame {shlex.quote(flame.id)} '
                         '--execute') from None
                 raise
-            poll = (f'keepflame run-once --config {config_arg} --flame {shlex.quote(flame.id)} --via-daemon '
+            poll = (f'{module_command()} run-once --config {config_arg} --flame {shlex.quote(flame.id)} --via-daemon '
                     f'--request-id {request["id"]}{" --force" if args.force else ""} --execute')
             print(json.dumps({'event': 'daemon_run_request', 'request_id': request['id'],
                               'state': request['state'], 'expires_at': request['expires_at'],

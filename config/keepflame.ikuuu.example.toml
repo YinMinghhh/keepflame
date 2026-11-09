@@ -25,12 +25,19 @@ stop_at = "23:00"
 [flames.settings]
 # Absolute path OUTSIDE any git checkout. Written by
 #   pbpaste | keepflame ikuuu import-cookie --flame ikuuu-primary --base https://ikuuu.pw
-# with mode 600. Never put the cookie itself in this TOML file.
+# with mode 600. Mode 600 is a permission, not encryption. Never put the cookie itself in this TOML file.
+# There is no password file. The public login page has a captcha, so a stored password is not used.
 cookie_file = "/absolute/path/outside/repos/keepflame/secrets/ikuuu-primary.cookie"
 # Public navigation pages whose (obfuscated) script lists the current domains.
 nav_seeds = ["https://ikuuu.bar/"]
 # Optional manual pin used before discovery; the cookie file's own base wins.
+# Required when browser_profile_dir is set: the profile is pinned to this origin.
 # base_url = "https://ikuuu.pw"
+# Dedicated Chrome profile on the machine that runs the service. Not the everyday Chrome directory.
+# Enroll with the service interpreter, not a PATH lookup of the keepflame script:
+#   <venv>/bin/python -m keepflame ikuuu enroll-profile --config <this file> --flame ikuuu-primary --execute
+# browser_profile_dir = "/absolute/path/outside/repos/keepflame/profiles/ikuuu-primary"
+# Do not set credential_file. A password channel is rejected.
 # host_pattern = '^ikuuu\.[a-z]{2,24}$'
 # max_probes = 8
 # timeout_seconds = 15
